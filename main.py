@@ -25,10 +25,13 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "xp_bot.db")
 
+# 메인 그룹 ID (랭킹 및 요약 기준)
 MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))  # 0이면 미지정
 
+# BotFather 로 만든 오너 ID
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# 초기 관리자 (쉼표 구분)
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 INITIAL_ADMIN_IDS = set()
 for part in _admin_env.split(","):
@@ -98,6 +101,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    # 유저 XP 정보
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS user_stats (
@@ -116,6 +120,7 @@ def init_db():
         """
     )
 
+    # 초대 링크
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS invite_links (
@@ -128,6 +133,7 @@ def init_db():
         """
     )
 
+    # 어떤 링크로 들어왔는지 기록
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS invited_users (
@@ -141,6 +147,7 @@ def init_db():
         """
     )
 
+    # 관리자 목록
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS admin_users (
@@ -149,6 +156,7 @@ def init_db():
         """
     )
 
+    # 초기 관리자 등록
     for aid in INITIAL_ADMIN_IDS:
         cur.execute("INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)", (aid,))
 
@@ -827,7 +835,13 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
 async def main():
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # ⚠️ JobQueue 를 쓰기 위해 반드시 .job_queue() 호출
+    app: Application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .job_queue()          # ← 이게 없으면 job_queue가 None 이라 에러남
+        .build()
+    )
 
     # XP
     app.add_handler(
@@ -861,11 +875,14 @@ async def main():
     )
 
     # 매일 summary (KST 23:59 = UTC 14:59)
-    app.job_queue.run_daily(
-        send_daily_summary,
-        time=time(hour=14, minute=59, tzinfo=timezone.utc),
-        name="daily_summary",
-    )
+    if app.job_queue is not None:
+        app.job_queue.run_daily(
+            send_daily_summary,
+            time=time(hour=14, minute=59, tzinfo=timezone.utc),
+            name="daily_summary",
+        )
+    else:
+        logger.warning("JobQueue is None — daily summary 비활성화")
 
     logger.info("XP Bot started")
     await app.run_polling(close_loop=False)
