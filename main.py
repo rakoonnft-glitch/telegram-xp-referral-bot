@@ -720,4 +720,10 @@ async def main():
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(main())
+    init_db()
+
+    # 기존 asyncio.run(main()) 삭제.
+    # 아래 코드로 교체.
+    asyncio.get_event_loop().create_task(main())
+    asyncio.get_event_loop().run_forever()
+
