@@ -472,7 +472,7 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=f"referral:{user.id}",
             creates_join_request=False,
         )
-    except Exception as e:
+    except Exception:
         logger.exception("초대 링크 생성 실패")
         await update.message.reply_text(
             "초대 링크를 생성할 수 없습니다.\n"
@@ -561,10 +561,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     old = chat_member.old_chat_member
 
     # 새로 들어온 경우만 처리
-    if old.status in ("left", "kicked") and new.status in (
-        "member",
-        "restricted",
-    ):
+    if old.status in ("left", "kicked") and new.status in ("member", "restricted"):
         user = new.user
         invite_link = chat_member.invite_link
         if invite_link is None:
@@ -615,7 +612,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # 초대한 사람의 invites_count +1
         cur.execute(
             """
-            SELECT invites_count, username, first_name, last_name FROM user_stats
+            SELECT invites_count FROM user_stats
             WHERE chat_id = ? AND user_id = ?
             """,
             (chat.id, inviter_id),
@@ -684,7 +681,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # -----------------------
 
 
-async def main():
+def main():
     init_db()
     application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -714,16 +711,8 @@ async def main():
     )
 
     logger.info("XP Bot started")
-    await application.run_polling(close_loop=False)
+    application.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
-    import asyncio
-
-    init_db()
-
-    # 기존 asyncio.run(main()) 삭제.
-    # 아래 코드로 교체.
-    asyncio.get_event_loop().create_task(main())
-    asyncio.get_event_loop().run_forever()
-
+    main()
