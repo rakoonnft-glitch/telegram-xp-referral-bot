@@ -735,7 +735,7 @@ async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("\n".join(lines))
 
 
-async def _resolve_target_user_id(arg: str) -> int | None:
+async def _resolve_target_user_id(arg: str):
     """@username 또는 숫자 user_id 문자열을 받아 user_id 반환 (없으면 None)"""
     q = arg.strip()
     if q.startswith("@"):
@@ -862,8 +862,16 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /resetxp
+    OWNER 전용.
+    - 처음 호출: 경고 + 사용법 안내
+    - '/resetxp 동의합니다.' 로 다시 호출했을 때만 실제 초기화 수행
+    - 초기화 직전 스냅샷을 OWNER DM 으로 먼저 보내고 그 후 리셋
+    """
     user = update.effective_user
     msg = update.message
+    args = context.args
 
     if not is_owner(user.id):
         await msg.reply_text("OWNER만 사용할 수 있습니다.")
@@ -873,8 +881,43 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("MAIN_CHAT_ID가 설정되어 있지 않아 XP를 리셋할 수 없습니다.")
         return
 
+    confirmation_text = "동의합니다."
+
+    # 1차 호출: 경고 & 사용법 안내
+    if not args or " ".join(args) != confirmation_text:
+        await msg.reply_text(
+            "⚠️ 이 명령어는 메인 그룹의 모든 XP/레벨/메시지/초대 기록을 초기화합니다.\n"
+            "정말로 초기화를 진행하시겠습니까?\n\n"
+            f"초기화를 진행하려면 아래와 같이 다시 입력해 주세요.\n"
+            f"`/resetxp {confirmation_text}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # 여기까지 왔으면 '/resetxp 동의합니다.' 로 호출된 것
     conn = get_conn()
     cur = conn.cursor()
+
+    # 리셋 전 스냅샷 생성
+    cur.execute(
+        """
+        SELECT username, first_name, last_name, xp, level
+        FROM user_stats
+        WHERE chat_id=?
+        ORDER BY xp DESC
+        LIMIT 10
+        """,
+        (MAIN_CHAT_ID,),
+    )
+    rows = cur.fetchall()
+
+    cur.execute(
+        "SELECT COUNT(*) AS c FROM user_stats WHERE chat_id=?",
+        (MAIN_CHAT_ID,),
+    )
+    total_users = cur.fetchone()["c"]
+
+    # 실제 리셋 수행
     cur.execute(
         """
         UPDATE user_stats
@@ -887,8 +930,34 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await msg.reply_text(f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 의 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
-                         f"(영향 받은 유저 수: {affected}명)")
+    # 스냅샷 텍스트 구성
+    if not rows:
+        snapshot_body = "초기화 직전 기록된 데이터가 없습니다."
+    else:
+        lines = [f"XP 초기화 직전 스냅샷 (MAIN_CHAT_ID={MAIN_CHAT_ID})\n"]
+        for i, row in enumerate(rows, start=1):
+            if row["username"]:
+                name = f"@{row['username']}"
+            else:
+                fn = row["first_name"] or ""
+                ln = row["last_name"] or ""
+                name = (fn + " " + ln).strip() or "이름없음"
+            lines.append(f"{i}. {name} - Lv.{row['level']} ({row['xp']} XP)")
+        lines.append(f"\n총 기록된 유저 수: {total_users}명")
+        snapshot_body = "\n".join(lines)
+
+    # OWNER DM 으로 스냅샷 전송
+    try:
+        await msg.bot.send_message(chat_id=user.id, text=snapshot_body)
+    except Exception:
+        logger.exception("resetxp 스냅샷 DM 전송 실패")
+
+    # 최종 안내 메시지
+    await msg.reply_text(
+        f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 의 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
+        f"(영향 받은 유저 수: {affected}명)\n"
+        "초기화 직전 스냅샷은 DM으로 전송했습니다.",
+    )
 
 
 # -----------------------
