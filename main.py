@@ -829,17 +829,17 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# MAIN
+# MAIN (동기)
 # -----------------------
 
-async def main():
+def main():
     init_db()
 
-    # ⚠️ JobQueue 를 쓰기 위해 반드시 .job_queue() 호출
+    # JobQueue 사용 위해 .job_queue() 호출
     app: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .job_queue()          # ← 이게 없으면 job_queue가 None 이라 에러남
+        .job_queue()
         .build()
     )
 
@@ -885,9 +885,8 @@ async def main():
         logger.warning("JobQueue is None — daily summary 비활성화")
 
     logger.info("XP Bot started")
-    await app.run_polling(close_loop=False)
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
