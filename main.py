@@ -22,6 +22,7 @@ from telegram.ext import (
 # -----------------------
 # 환경 변수 / 설정
 # -----------------------
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "xp_bot.db")
 
@@ -246,12 +247,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "안녕하세요! 저는 Terminal.Fi XP 봇입니다.\n"
         "이 채팅방에서 메시지를 보내면 XP를 얻고 레벨이 올라가요.\n\n"
         "주요 명령어:\n"
-        "/stats - 내 레벨/XP 확인\n"
+        "/stats   - 내 레벨/XP 확인\n"
         "/ranking - 상위 10명 랭킹\n"
-        "/daily - 하루 한 번 보너스 XP\n"
-        "/mylink - 나만의 초대 링크 생성 (메인 그룹 전용)\n"
-        "/refstats - 초대 랭킹 보기 (메인 그룹 전용)\n"
-        "/chatid - 이 채팅의 ID 확인"
+        "/daily   - 하루 한 번 보너스 XP\n"
+        "/mylink  - 나만의 초대 링크 생성 (메인 그룹 전용)\n"
+        "/refstats- 초대 랭킹 보기 (메인 그룹 전용)\n"
+        "/chatid  - 이 채팅의 ID 확인"
     )
 
 
@@ -259,7 +260,9 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
         return
-    await update.message.reply_text(f"이 채팅의 ID는 `{chat.id}` 입니다.", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"이 채팅의 ID는 `{chat.id}` 입니다.", parse_mode="Markdown"
+    )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -677,12 +680,13 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # -----------------------
-# 메인
+# 메인 (동기 함수)
 # -----------------------
 
 
 def main():
     init_db()
+
     application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # 메시지 핸들러 (텍스트/캡션, 명령어 제외)
@@ -693,7 +697,7 @@ def main():
         )
     )
 
-    # 명령어
+    # 명령어 핸들러
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("chatid", cmd_chatid))
     application.add_handler(CommandHandler(["stats", "xp"], cmd_stats))
