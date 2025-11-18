@@ -259,6 +259,43 @@ def add_xp(chat_id: int, user, base_xp: int) -> tuple[int, int, int]:
 
 
 # -----------------------
+# 초대 카운트 유틸
+# -----------------------
+
+
+def get_invite_count_for_user(user_id: int) -> int:
+    """
+    invite_links.joined_count 합산해서 초대 인원 수 계산
+    MAIN_CHAT_ID 가 설정되어 있으면 그 채팅 기준, 아니면 전체.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    if MAIN_CHAT_ID != 0:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(joined_count), 0) AS c
+            FROM invite_links
+            WHERE inviter_id = ? AND chat_id = ?
+            """,
+            (user_id, MAIN_CHAT_ID),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(joined_count), 0) AS c
+            FROM invite_links
+            WHERE inviter_id = ?
+            """,
+            (user_id,),
+        )
+    row = cur.fetchone()
+    conn.close()
+    if row is None or row["c"] is None:
+        return 0
+    return int(row["c"])
+
+
+# -----------------------
 # 일반 메시지 → XP
 # -----------------------
 
@@ -321,6 +358,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ranking - 상위 10명 랭킹\n"
             "/daily - 하루 한 번 보너스 XP\n"
             "/mylink - 나만의 초대 링크 생성 (메인 그룹 전용)\n"
+            "/myref - 내 초대 링크로 들어온 인원 수 확인\n"
             "/refstats - 초대 랭킹 보기 (메인 그룹 전용)\n"
         )
 
@@ -336,6 +374,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\n[관리자 전용 명령어]  (DM 에서만 사용 권장)\n"
                 "/chatid - 이 채팅의 ID 확인\n"
                 "/listadmins - 관리자 ID 목록 보기\n"
+                "/refuser <@handle 또는 user_id> - 해당 유저 초대 인원 조회\n"
                 "/resetxp - 메인 그룹 XP 초기화 (OWNER 전용)\n"
             )
 
@@ -397,7 +436,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ 경험치: {xp} XP\n"
         f"📈 다음 레벨까지: {remain} XP\n"
         f"💬 총 메시지 수: {messages_count}\n"
-        f"👥 초대 인원 수: {invites_count}"
+        f"👥 초대 인원 수(별도 시스템): {invites_count}\n"
     )
 
     await update.message.reply_text(text)
@@ -624,6 +663,22 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_myref(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /myref, /myinvites
+    → 내 초대 링크로 들어온 인원 수 확인
+    """
+    user = update.effective_user
+    msg = update.message
+    if user is None or msg is None:
+        return
+
+    count = get_invite_count_for_user(user.id)
+    await msg.reply_text(
+        f"👥 현재까지 내 초대 링크를 통해 들어온 인원은 총 {count}명입니다."
+    )
+
+
 async def cmd_refstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
@@ -783,7 +838,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # -----------------------
-# 관리자용 명령어 (간단 버전)
+# 관리자용 명령어
 # -----------------------
 
 
@@ -806,6 +861,82 @@ async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"- {aid}")
 
     await msg.reply_text("\n".join(lines))
+
+
+async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /refuser <@handle 또는 user_id>
+    → 관리자 전용: 특정 유저의 초대 인원 수 조회
+    """
+    user = update.effective_user
+    msg = update.message
+    args = context.args
+
+    if user is None or msg is None:
+        return
+
+    if not is_admin(user.id):
+        await msg.reply_text("이 명령어는 관리자만 사용할 수 있습니다.")
+        return
+
+    if not args:
+        await msg.reply_text("사용법: /refuser @username 또는 /refuser 123456789")
+        return
+
+    query = args[0].strip()
+    if query.startswith("@"):
+        query = query[1:]
+
+    target_user_id = None
+    target_name = None
+
+    # 숫자면 바로 user_id 로 사용
+    if query.isdigit():
+        target_user_id = int(query)
+        target_name = f"user_id {target_user_id}"
+    else:
+        # username 으로 user_stats 에서 찾기
+        conn = get_conn()
+        cur = conn.cursor()
+        if MAIN_CHAT_ID != 0:
+            cur.execute(
+                """
+                SELECT user_id, username, first_name, last_name
+                FROM user_stats
+                WHERE chat_id = ? AND username = ?
+                LIMIT 1
+                """,
+                (MAIN_CHAT_ID, query),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT user_id, username, first_name, last_name
+                FROM user_stats
+                WHERE username = ?
+                LIMIT 1
+                """,
+                (query,),
+            )
+        row = cur.fetchone()
+        conn.close()
+
+        if row is None:
+            await msg.reply_text("해당 username 을 user_stats 에서 찾을 수 없습니다.")
+            return
+
+        target_user_id = int(row["user_id"])
+        if row["username"]:
+            target_name = f"@{row['username']}"
+        else:
+            fn = row["first_name"] or ""
+            ln = row["last_name"] or ""
+            target_name = (fn + " " + ln).strip() or f"user_id {target_user_id}"
+
+    count = get_invite_count_for_user(target_user_id)
+    await msg.reply_text(
+        f"👥 {target_name} 님의 초대 링크를 통해 들어온 인원은 총 {count}명입니다."
+    )
 
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -937,10 +1068,12 @@ async def main():
     application.add_handler(CommandHandler(["ranking", "rank"], cmd_ranking))
     application.add_handler(CommandHandler("daily", cmd_daily))
     application.add_handler(CommandHandler("mylink", cmd_mylink))
+    application.add_handler(CommandHandler(["myref", "myinvites"], cmd_myref))
     application.add_handler(CommandHandler("refstats", cmd_refstats))
 
     # 관리자용
     application.add_handler(CommandHandler("listadmins", cmd_listadmins))
+    application.add_handler(CommandHandler("refuser", cmd_refuser))
     application.add_handler(CommandHandler("resetxp", cmd_resetxp))
 
     # chat_member 업데이트 (초대 추적)
