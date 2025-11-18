@@ -1099,7 +1099,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     OWNER 전용.
     - 처음 호출: 경고 + 사용법 안내
     - '/resetxp 동의합니다.' 로 다시 호출했을 때만 실제 초기화 수행
-    - 초기화 직전 스냅샷을 OWNER DM 으로 먼저 보내고 그 후 리셋
+    - 초기화 직전 스냅샷을 OWNER 및 관리자 DM 으로 보내고 그 후 리셋 안내
     """
     user = update.effective_user
     msg = update.message
@@ -1178,17 +1178,18 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n총 기록된 유저 수: {total_users}명")
         snapshot_body = "\n".join(lines)
 
-    # OWNER DM 으로 스냅샷 전송
-    try:
-        await msg.bot.send_message(chat_id=user.id, text=snapshot_body)
-    except Exception:
-        logger.exception("resetxp 스냅샷 DM 전송 실패")
+    # OWNER + 관리자 전체 DM 으로 스냅샷 전송
+    for uid in all_admin_targets():
+        try:
+            await msg.bot.send_message(chat_id=uid, text=snapshot_body)
+        except Exception:
+            logger.exception("resetxp 스냅샷 DM 전송 실패 (user_id=%s)", uid)
 
     # 최종 안내 메시지
     await msg.reply_text(
         f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 의 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
         f"(영향 받은 유저 수: {affected}명)\n"
-        "초기화 직전 스냅샷은 DM으로 전송했습니다.",
+        "초기화 직전 스냅샷은 OWNER 및 관리자 DM으로 전송했습니다.",
     )
 
 
