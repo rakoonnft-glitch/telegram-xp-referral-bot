@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, time, timezone
 from math import sqrt
 
-from dotenv import load_dotenv  # .env 읽기용
+from dotenv import load_dotenv
 
 from telegram import (
     Update,
@@ -12,6 +12,7 @@ from telegram import (
     ChatInviteLink,
 )
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -21,16 +22,20 @@ from telegram.ext import (
 )
 
 # -----------------------
-# .env 로드 + 기본 설정
+# .env 로드 & 기본 설정
 # -----------------------
-load_dotenv()  # 현재 디렉토리의 .env 파일 로드
+load_dotenv()  # .env 파일 읽기
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "xp_bot.db")
 
-MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))
+# 메인 그룹 (랭킹/요약 기준 채팅)
+MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))  # 0이면 미지정
+
+# Bot owner (BotFather로 만든 계정)
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# 최초 관리자 목록 (.env의 ADMIN_USER_IDS)
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 INITIAL_ADMIN_IDS: set[int] = set()
 for part in _admin_env.split(","):
@@ -50,32 +55,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 메모리 관리자 목록
+# 현재 프로세스 메모리에 들고 있는 관리자 목록
 ADMIN_USER_IDS: set[int] = set()
 
 
-def is_owner(uid: int) -> bool:
-    return OWNER_ID != 0 and uid == OWNER_ID
+def is_owner(user_id: int) -> bool:
+    return OWNER_ID != 0 and user_id == OWNER_ID
 
 
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_USER_IDS or is_owner(uid)
+def is_admin(user_id: int) -> bool:
+    return is_owner(user_id) or user_id in ADMIN_USER_IDS
 
 
 def all_admin_targets() -> set[int]:
-    t = set(ADMIN_USER_IDS)
+    targets = set(ADMIN_USER_IDS)
     if OWNER_ID:
-        t.add(OWNER_ID)
-    return t
+        targets.add(OWNER_ID)
+    return targets
 
 
 def is_main_chat(chat_id: int) -> bool:
-    return MAIN_CHAT_ID == 0 or chat_id == MAIN_CHAT_ID
+    if MAIN_CHAT_ID == 0:
+        return True
+    return chat_id == MAIN_CHAT_ID
 
 
 # -----------------------
-# DB UTIL
+# DB 유틸
 # -----------------------
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -84,6 +92,7 @@ def get_conn():
 
 
 def reload_admins():
+    """admin_users 테이블에서 관리자 리스트 다시 읽기"""
     global ADMIN_USER_IDS
     conn = get_conn()
     cur = conn.cursor()
@@ -98,7 +107,9 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("""
+    # 유저 XP / 메세지 / 초대수
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS user_stats (
             chat_id INTEGER,
             user_id INTEGER,
@@ -110,11 +121,14 @@ def init_db():
             messages_count INTEGER DEFAULT 0,
             last_daily TEXT,
             invites_count INTEGER DEFAULT 0,
-            PRIMARY KEY(chat_id, user_id)
+            PRIMARY KEY (chat_id, user_id)
         )
-    """)
+        """
+    )
 
-    cur.execute("""
+    # 초대 링크 테이블
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS invite_links (
             invite_link TEXT PRIMARY KEY,
             chat_id INTEGER,
@@ -122,20 +136,35 @@ def init_db():
             created_at TEXT,
             joined_count INTEGER DEFAULT 0
         )
-    """)
+        """
+    )
 
-    cur.execute("""
+    # 어떤 유저가 어떤 초대 링크로 들어왔는지
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invited_users (
+            chat_id INTEGER,
+            user_id INTEGER,
+            inviter_id INTEGER,
+            invite_link TEXT,
+            joined_at TEXT,
+            PRIMARY KEY (chat_id, user_id)
+        )
+        """
+    )
+
+    # 관리자 목록
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS admin_users (
             admin_id INTEGER PRIMARY KEY
         )
-    """)
+        """
+    )
 
-    # 초기 관리자 등록 (.env 기준)
+    # 최초 관리자 등록
     for aid in INITIAL_ADMIN_IDS:
-        cur.execute(
-            "INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)",
-            (aid,),
-        )
+        cur.execute("INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)", (aid,))
 
     conn.commit()
     conn.close()
@@ -144,20 +173,22 @@ def init_db():
 
 
 # -----------------------
-# XP 계산
+# XP / 레벨 계산
 # -----------------------
 
+
 def calc_level(xp: int) -> int:
+    # xp가 커질수록 레벨업이 점점 어려워지도록
     return int(sqrt(xp / 100)) + 1 if xp > 0 else 1
 
 
 def xp_for_next_level(level: int) -> int:
-    # 레벨 n -> n+1 까지 필요한 누적 xp
     next_level = level + 1
-    return int((next_level ** 2) * 100)
+    return int((next_level - 1) ** 2 * 100)
 
 
 def add_xp(chat_id: int, user, base_xp: int):
+    """XP 추가 후 (xp, level, messages_count) 반환"""
     user_id = user.id
     username = user.username
     first_name = user.first_name or ""
@@ -173,15 +204,14 @@ def add_xp(chat_id: int, user, base_xp: int):
     row = cur.fetchone()
 
     if not row:
-        xp = base_xp
+        xp = max(0, base_xp)
         level = calc_level(xp)
-        msg_count = 1
-
+        messages_count = 1
         cur.execute(
             """
             INSERT INTO user_stats
             (chat_id, user_id, username, first_name, last_name, xp, level, messages_count)
-            VALUES (?,?,?,?,?,?,?,?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 chat_id,
@@ -191,14 +221,13 @@ def add_xp(chat_id: int, user, base_xp: int):
                 last_name,
                 xp,
                 level,
-                msg_count,
+                messages_count,
             ),
         )
     else:
-        xp = row["xp"] + base_xp
+        xp = row["xp"] + max(0, base_xp)
         level = calc_level(xp)
-        msg_count = row["messages_count"] + 1
-
+        messages_count = row["messages_count"] + 1
         cur.execute(
             """
             UPDATE user_stats
@@ -211,7 +240,7 @@ def add_xp(chat_id: int, user, base_xp: int):
                 last_name,
                 xp,
                 level,
-                msg_count,
+                messages_count,
                 chat_id,
                 user_id,
             ),
@@ -219,12 +248,44 @@ def add_xp(chat_id: int, user, base_xp: int):
 
     conn.commit()
     conn.close()
-    return xp, level, msg_count
+    return xp, level, messages_count
+
+
+# -----------------------
+# 초대수 계산 (invite_links 기준)
+# -----------------------
+
+
+def get_invite_count_for_user(user_id: int) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    if MAIN_CHAT_ID != 0:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(joined_count),0) AS c
+            FROM invite_links
+            WHERE inviter_id=? AND chat_id=?
+            """,
+            (user_id, MAIN_CHAT_ID),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(joined_count),0) AS c
+            FROM invite_links
+            WHERE inviter_id=?
+            """,
+            (user_id,),
+        )
+    row = cur.fetchone()
+    conn.close()
+    return int(row["c"] or 0)
 
 
 # -----------------------
 # 일반 메시지 → XP
 # -----------------------
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -243,18 +304,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if level > calc_level(xp - base_xp):
         await message.reply_text(
-            f"🎉 {user.mention_html()} 님이 레벨업 했습니다! (Lv {level})",
+            f"🎉 {user.mention_html()} 님이 레벨업 했습니다!\n➡️ 현재 레벨: {level}",
             parse_mode="HTML",
         )
 
 
 # -----------------------
-# /start (help 통합)
+# /start — 단일 도움말 명령어
 # -----------------------
 
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
     user = update.effective_user
-    msg = update.message
+
+    if not message or not chat or not user:
+        return
 
     base_text = (
         "안녕하세요! Terminal.Fi XP Bot입니다.\n"
@@ -270,25 +336,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = base_text
 
+    # 관리자/OWNER 추가 메뉴
     if is_admin(user.id):
         text += (
             "\n🔧 관리자 명령어\n"
             "/chatid - 이 채팅의 ID 확인\n"
             "/listadmins - 관리자 목록\n"
             "/refuser <@handle 또는 user_id> - 특정 유저 초대수\n"
+            "/userstats <@handle 또는 user_id> - 특정 유저 스탯\n"
         )
 
     if is_owner(user.id):
-        text += "\n👑 OWNER 전용 명령어\n/resetxp - 메인 그룹 XP 초기화\n"
+        text += (
+            "\n👑 OWNER 전용 명령어\n"
+            "/resetxp - 메인 그룹 XP 초기화\n"
+        )
 
-    await msg.reply_text(text)
+    await message.reply_text(text)
 
 
 # -----------------------
-# /chatid
+# 공용 / 유저 명령어
 # -----------------------
+
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     user = update.effective_user
     msg = update.message
 
@@ -296,13 +369,8 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
 
-    chat_id = update.effective_chat.id
-    await msg.reply_text(f"이 채팅의 ID는 `{chat_id}` 입니다.", parse_mode="Markdown")
+    await msg.reply_text(f"이 채팅의 ID는 `{chat.id}` 입니다.", parse_mode="Markdown")
 
-
-# -----------------------
-# /stats
-# -----------------------
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -312,11 +380,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        """
-        SELECT xp, level, messages_count, invites_count
-        FROM user_stats
-        WHERE chat_id=? AND user_id=?
-        """,
+        "SELECT xp, level, messages_count, last_daily, invites_count "
+        "FROM user_stats WHERE chat_id=? AND user_id=?",
         (chat.id, user.id),
     )
     row = cur.fetchone()
@@ -330,27 +395,21 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     level = row["level"]
     msgs = row["messages_count"]
     invites = row["invites_count"]
-    remain = max(0, xp_for_next_level(level) - xp)
+    next_xp = xp_for_next_level(level)
 
     text = (
         f"📊 {user.full_name} 님의 통계\n\n"
         f"🎯 레벨: {level}\n"
-        f"⭐ 경험치: {xp} XP\n"
-        f"📈 다음 레벨까지: {remain} XP\n"
+        f"⭐ 경험치: {xp}\n"
+        f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n"
         f"💬 메시지 수: {msgs}\n"
-        f"👥 초대 인원: {invites}\n"
+        f"👥 초대 인원(유저 통계): {invites}\n"
     )
-
     await msg.reply_text(text)
 
 
-# -----------------------
-# /ranking
-# -----------------------
-
 async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    msg = update.message
 
     conn = get_conn()
     cur = conn.cursor()
@@ -368,26 +427,27 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not rows:
-        await msg.reply_text("랭킹 데이터가 없습니다.")
+        await update.message.reply_text("아직 데이터가 없습니다.")
         return
 
-    lines = ["🏆 경험치 랭킹 TOP 10\n"]
+    lines = ["🏆 경험치 TOP 10\n"]
     medals = ["🥇", "🥈", "🥉"]
 
-    for i, r in enumerate(rows, 1):
-        username = r["username"]
-        name = f"@{username}" if username else (r["first_name"] or "이름없음")
-        xp = r["xp"]
-        level = r["level"]
+    for i, row in enumerate(rows, start=1):
+        username = row["username"]
+        if username:
+            name = f"@{username}"
+        else:
+            fn = row["first_name"] or ""
+            ln = row["last_name"] or ""
+            name = (fn + " " + ln).strip() or "이름없음"
+        xp = row["xp"]
+        level = row["level"]
         prefix = medals[i - 1] if i <= 3 else f"{i}."
         lines.append(f"{prefix} {name} - Lv.{level} ({xp} XP)")
 
-    await msg.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
-
-# -----------------------
-# /daily
-# -----------------------
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -397,7 +457,8 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT xp, level, last_daily FROM user_stats WHERE chat_id=? AND user_id=?",
+        "SELECT xp, level, messages_count, last_daily "
+        "FROM user_stats WHERE chat_id=? AND user_id=?",
         (chat.id, user.id),
     )
     row = cur.fetchone()
@@ -406,13 +467,11 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bonus = 50
 
     if not row:
-        xp = bonus
-        level = calc_level(xp)
         cur.execute(
             """
             INSERT INTO user_stats
-            (chat_id,user_id,username,first_name,last_name,xp,level,messages_count,last_daily,invites_count)
-            VALUES (?,?,?,?,?,?,?,?,?,0)
+            (chat_id,user_id,username,first_name,last_name,xp,level,messages_count,last_daily)
+            VALUES (?,?,?,?,?,?,?,?,?)
             """,
             (
                 chat.id,
@@ -420,8 +479,8 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.username,
                 user.first_name or "",
                 user.last_name or "",
-                xp,
-                level,
+                bonus,
+                calc_level(bonus),
                 0,
                 now.isoformat(),
             ),
@@ -431,68 +490,60 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"🎁 첫 일일 보상으로 {bonus} XP를 받았습니다!")
         return
 
-    last_daily = row["last_daily"]
-    if last_daily:
-        last_dt = datetime.fromisoformat(last_daily)
+    last = row["last_daily"]
+    if last:
+        last_dt = datetime.fromisoformat(last)
         if now - last_dt < timedelta(hours=24):
             remain = timedelta(hours=24) - (now - last_dt)
             h = remain.seconds // 3600
             m = (remain.seconds % 3600) // 60
-            await msg.reply_text(
-                f"⏰ 이미 오늘의 보상을 받았습니다.\n"
-                f"{h}시간 {m}분 후에 다시 시도해 주세요."
-            )
+            await msg.reply_text(f"⏰ 이미 오늘 보상을 받았습니다.\n{h}시간 {m}분 후에 다시 시도해 주세요.")
             conn.close()
             return
 
     xp = row["xp"] + bonus
     level = calc_level(xp)
-
     cur.execute(
-        """
-        UPDATE user_stats
-        SET xp=?, level=?, last_daily=?
-        WHERE chat_id=? AND user_id=?
-        """,
+        "UPDATE user_stats SET xp=?,level=?,last_daily=? WHERE chat_id=? AND user_id=?",
         (xp, level, now.isoformat(), chat.id, user.id),
     )
     conn.commit()
     conn.close()
 
-    await msg.reply_text(f"🎁 일일 보상으로 {bonus} XP를 받았습니다!")
+    await msg.reply_text(f"🎁 일일 보상으로 {bonus} XP를 받았습니다!\n현재 XP: {xp}, 레벨: {level}")
 
 
 # -----------------------
-# /mylink
+# /mylink & 초대 랭킹
 # -----------------------
+
 
 async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    msg = update.message
     bot = context.bot
 
     if chat.type not in ("group", "supergroup"):
-        await msg.reply_text("이 명령어는 그룹 채팅에서만 사용할 수 있습니다.")
+        await update.message.reply_text("이 명령어는 그룹에서만 사용할 수 있습니다.")
         return
 
     if not is_main_chat(chat.id):
-        await msg.reply_text("이 봇의 레퍼럴 시스템은 메인 그룹에서만 사용할 수 있습니다.")
+        await update.message.reply_text("메인 그룹에서만 사용할 수 있는 명령어입니다.")
         return
 
     conn = get_conn()
     cur = conn.cursor()
 
-    # 기존 링크 존재 여부 확인
+    # 이미 발급한 초대링크가 있는지 확인
     cur.execute(
-        "SELECT invite_link FROM invite_links WHERE chat_id=? AND inviter_id=?",
+        "SELECT invite_link FROM invite_links WHERE chat_id=? AND inviter_id=? LIMIT 1",
         (chat.id, user.id),
     )
     row = cur.fetchone()
 
     if row:
-        await msg.reply_text(
-            "👥 이미 생성된 나만의 초대 링크가 있습니다!\n"
+        await update.message.reply_text(
+            "이미 생성된 나만의 초대 링크가 있습니다.\n"
             "이 링크를 계속 사용해 주세요.\n\n"
             f"{row['invite_link']}"
         )
@@ -508,76 +559,48 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception:
         conn.close()
-        logger.exception("초대 링크 생성 실패")
-        await msg.reply_text(
-            "초대 링크를 생성할 수 없습니다.\n"
-            "봇이 관리자이며 초대 링크 생성 권한이 있는지 확인해 주세요."
-        )
+        await update.message.reply_text("초대 링크를 생성할 수 없습니다. (봇 권한을 확인해 주세요)")
         return
 
     cur.execute(
         """
-        INSERT INTO invite_links (invite_link, chat_id, inviter_id, created_at, joined_count)
-        VALUES (?, ?, ?, ?, 0)
+        INSERT INTO invite_links (invite_link,chat_id,inviter_id,created_at)
+        VALUES (?,?,?,?)
         """,
         (invite.invite_link, chat.id, user.id, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
 
-    await msg.reply_text(
+    await update.message.reply_text(
         "👥 나만의 초대 링크를 생성했습니다!\n"
-        "이 링크로 들어온 인원은 모두 내 초대로 집계됩니다.\n\n"
+        "이 링크로 입장한 인원은 모두 내 초대로 집계됩니다.\n\n"
         f"{invite.invite_link}"
     )
 
 
-# -----------------------
-# /myref
-# -----------------------
-
 async def cmd_myref(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
+    count = get_invite_count_for_user(user.id)
 
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(joined_count),0) AS c
-        FROM invite_links
-        WHERE inviter_id=?
-        """,
-        (user.id,),
-    )
-    row = cur.fetchone()
-    conn.close()
+    await msg.reply_text(f"👥 현재까지 내 초대 링크로 들어온 인원은 총 {count}명입니다.")
 
-    count = int(row["c"] or 0)
-    await msg.reply_text(
-        f"👥 현재까지 내 초대 링크를 통해 들어온 인원은 총 {count}명입니다."
-    )
-
-
-# -----------------------
-# /refstats (초대 랭킹)
-# -----------------------
 
 async def cmd_refstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    msg = update.message
 
     if not is_main_chat(chat.id):
-        await msg.reply_text("초대 랭킹은 메인 그룹에서만 확인할 수 있습니다.")
+        await update.message.reply_text("초대 랭킹은 메인 그룹에서만 확인할 수 있습니다.")
         return
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT username, first_name, last_name, invites_count
+        SELECT username,first_name,last_name,invites_count
         FROM user_stats
-        WHERE chat_id=? AND invites_count > 0
+        WHERE chat_id=? AND invites_count>0
         ORDER BY invites_count DESC
         LIMIT 10
         """,
@@ -587,36 +610,40 @@ async def cmd_refstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not rows:
-        await msg.reply_text("아직 초대 기록이 없습니다.")
+        await update.message.reply_text("아직 초대 기록이 없습니다.")
         return
 
     lines = ["👥 초대 랭킹 TOP 10\n"]
-    for i, r in enumerate(rows, 1):
-        username = r["username"]
-        name = f"@{username}" if username else (r["first_name"] or "이름없음")
-        cnt = r["invites_count"]
-        lines.append(f"{i}. {name} - {cnt}명 초대")
+    for i, row in enumerate(rows, start=1):
+        if row["username"]:
+            name = f"@{row['username']}"
+        else:
+            fn = row["first_name"] or ""
+            ln = row["last_name"] or ""
+            name = (fn + " " + ln).strip() or "이름없음"
+        lines.append(f"{i}. {name} - {row['invites_count']}명")
 
-    await msg.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 # -----------------------
-# 초대 tracking (ChatMember)
+# 초대 tracking (멤버 입장 감지)
 # -----------------------
+
 
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if chat is None or not is_main_chat(chat.id):
+    if not is_main_chat(chat.id):
         return
 
-    chat_member: ChatMemberUpdated = update.chat_member
-    new = chat_member.new_chat_member
-    old = chat_member.old_chat_member
+    cm: ChatMemberUpdated = update.chat_member
+    new = cm.new_chat_member
+    old = cm.old_chat_member
 
     if old.status in ("left", "kicked") and new.status in ("member", "restricted"):
         user = new.user
-        invite_link = chat_member.invite_link
-        if invite_link is None:
+        invite_link = cm.invite_link
+        if not invite_link:
             return
 
         link_url = invite_link.invite_link
@@ -625,93 +652,116 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         cur = conn.cursor()
 
         cur.execute(
-            """
-            SELECT inviter_id, joined_count
-            FROM invite_links
-            WHERE invite_link=? AND chat_id=?
-            """,
+            "SELECT inviter_id,joined_count FROM invite_links WHERE invite_link=? AND chat_id=?",
             (link_url, chat.id),
         )
         row = cur.fetchone()
-        if row is None:
+
+        if not row:
             conn.close()
             return
 
-        inviter_id = row["inviter_id"]
-        joined_count = row["joined_count"] + 1
+        inviter = row["inviter_id"]
+        new_count = row["joined_count"] + 1
 
         cur.execute(
-            """
-            UPDATE invite_links
-            SET joined_count=?
-            WHERE invite_link=? AND chat_id=?
-            """,
-            (joined_count, link_url, chat.id),
+            "UPDATE invite_links SET joined_count=? WHERE invite_link=? AND chat_id=?",
+            (new_count, link_url, chat.id),
         )
 
-        # user_stats의 invites_count 업데이트
         cur.execute(
-            """
-            SELECT invites_count
-            FROM user_stats
-            WHERE chat_id=? AND user_id=?
-            """,
-            (chat.id, inviter_id),
+            "SELECT invites_count FROM user_stats WHERE chat_id=? AND user_id=?",
+            (chat.id, inviter),
         )
-        inviter_row = cur.fetchone()
-        if inviter_row is None:
+        inv_row = cur.fetchone()
+
+        if not inv_row:
             cur.execute(
                 """
                 INSERT INTO user_stats
-                (chat_id,user_id,username,first_name,last_name,xp,level,messages_count,last_daily,invites_count)
-                VALUES (?,?,?,?,?,0,1,0,NULL,1)
+                (chat_id,user_id,xp,level,messages_count,last_daily,invites_count)
+                VALUES (?,?,?,?,?,?,?)
                 """,
-                (chat.id, inviter_id, None, "", ""),
+                (chat.id, inviter, 0, 1, 0, None, 1),
             )
         else:
-            invites_count = inviter_row["invites_count"] + 1
+            cnt = inv_row["invites_count"] + 1
             cur.execute(
-                """
-                UPDATE user_stats
-                SET invites_count=?
-                WHERE chat_id=? AND user_id=?
-                """,
-                (invites_count, chat.id, inviter_id),
+                "UPDATE user_stats SET invites_count=? WHERE chat_id=? AND user_id=?",
+                (cnt, chat.id, inviter),
             )
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO invited_users
+            (chat_id,user_id,inviter_id,invite_link,joined_at)
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                chat.id,
+                user.id,
+                inviter,
+                link_url,
+                datetime.utcnow().isoformat(),
+            ),
+        )
 
         conn.commit()
         conn.close()
 
-        try:
-            await context.bot.send_message(
-                chat_id=chat.id,
-                text=(
-                    f"👋 {user.full_name} 님이 초대 링크를 통해 입장했습니다!\n"
-                    f"초대한 유저 ID: {inviter_id}"
-                ),
-            )
-        except Exception:
-            logger.exception("welcome 메시지 전송 실패")
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"👋 {user.full_name} 님이 초대 링크를 통해 입장했습니다! (초대자: {inviter})",
+        )
 
 
 # -----------------------
-# 관리자 명령어 (/listadmins, /refuser, /resetxp)
+# 관리자 명령어 (/listadmins, /refuser, /userstats, /resetxp)
 # -----------------------
+
 
 async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
-
     if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        await msg.reply_text("관리자만 사용 가능합니다.")
         return
 
     lines = ["현재 관리자 목록:"]
     if OWNER_ID:
-        lines.append(f"- OWNER_ID: {OWNER_ID}")
+        lines.append(f"- OWNER: {OWNER_ID}")
     for aid in sorted(ADMIN_USER_IDS):
         lines.append(f"- {aid}")
     await msg.reply_text("\n".join(lines))
+
+
+async def _resolve_target_user_id(arg: str) -> int | None:
+    """@username 또는 숫자 user_id 문자열을 받아 user_id 반환 (없으면 None)"""
+    q = arg.strip()
+    if q.startswith("@"):
+        q = q[1:]
+
+    if q.isdigit():
+        return int(q)
+
+    # username 으로 user_stats 에서 찾기 (MAIN_CHAT_ID 우선)
+    conn = get_conn()
+    cur = conn.cursor()
+    if MAIN_CHAT_ID != 0:
+        cur.execute(
+            "SELECT user_id FROM user_stats WHERE chat_id=? AND username=? LIMIT 1",
+            (MAIN_CHAT_ID, q),
+        )
+    else:
+        cur.execute(
+            "SELECT user_id FROM user_stats WHERE username=? LIMIT 1",
+            (q,),
+        )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return int(row["user_id"])
 
 
 async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -720,70 +770,95 @@ async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        await msg.reply_text("관리자만 사용 가능합니다.")
+        return
+    if not args:
+        await msg.reply_text("사용법: /refuser @username 또는 /refuser user_id")
+        return
+
+    target_id = await _resolve_target_user_id(args[0])
+    if target_id is None:
+        await msg.reply_text("해당 유저를 user_stats 에서 찾을 수 없습니다.")
+        return
+
+    count = get_invite_count_for_user(target_id)
+    await msg.reply_text(f"해당 유저 초대 인원: {count}명")
+
+
+async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자용: /userstats <@handle 또는 user_id> → 유저 스탯 조회"""
+    admin = update.effective_user
+    msg = update.message
+    args = context.args
+
+    if not is_admin(admin.id):
+        await msg.reply_text("관리자만 사용 가능합니다.")
         return
 
     if not args:
-        await msg.reply_text("사용법: /refuser @username 또는 /refuser 123456789")
+        await msg.reply_text("사용법: /userstats @username 또는 /userstats user_id")
         return
 
-    query = args[0].strip()
-    if query.startswith("@"):
-        query = query[1:]
+    target_id = await _resolve_target_user_id(args[0])
+    if target_id is None:
+        await msg.reply_text("해당 유저를 찾을 수 없습니다.")
+        return
 
-    target_user_id = None
-
-    if query.isdigit():
-        target_user_id = int(query)
-    else:
-        conn = get_conn()
-        cur = conn.cursor()
-        if MAIN_CHAT_ID != 0:
-            cur.execute(
-                """
-                SELECT user_id
-                FROM user_stats
-                WHERE chat_id=? AND username=?
-                LIMIT 1
-                """,
-                (MAIN_CHAT_ID, query),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT user_id
-                FROM user_stats
-                WHERE username=?
-                LIMIT 1
-                """,
-                (query,),
-            )
-        row = cur.fetchone()
-        conn.close()
-
-        if row is None:
-            await msg.reply_text("해당 username 을 user_stats 에서 찾을 수 없습니다.")
-            return
-
-        target_user_id = int(row["user_id"])
+    # 어느 채팅 기준으로 볼지: MAIN_CHAT_ID가 설정돼 있으면 그 기준
+    chat_id = MAIN_CHAT_ID or msg.chat_id
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT COALESCE(SUM(joined_count),0) AS c
-        FROM invite_links
-        WHERE inviter_id=?
+        SELECT username, first_name, last_name,
+               xp, level, messages_count, invites_count, last_daily
+        FROM user_stats
+        WHERE chat_id=? AND user_id=?
         """,
-        (target_user_id,),
+        (chat_id, target_id),
     )
     row = cur.fetchone()
     conn.close()
 
-    count = int(row["c"] or 0)
-    await msg.reply_text(
-        f"👥 해당 유저 초대 링크로 들어온 인원은 총 {count}명입니다."
+    if not row:
+        await msg.reply_text("해당 유저의 스탯 기록이 없습니다.")
+        return
+
+    if row["username"]:
+        name = f"@{row['username']}"
+    else:
+        fn = row["first_name"] or ""
+        ln = row["last_name"] or ""
+        name = (fn + " " + ln).strip() or f"user_id {target_id}"
+
+    xp = row["xp"]
+    level = row["level"]
+    msgs = row["messages_count"]
+    invites_db = row["invites_count"]
+    next_xp = xp_for_next_level(level)
+
+    # invite_links 기준으로 다시 한 번 합산 (참고용)
+    invites_links = get_invite_count_for_user(target_id)
+
+    last_daily = row["last_daily"]
+    if last_daily:
+        last_daily_str = datetime.fromisoformat(last_daily).strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        last_daily_str = "기록 없음"
+
+    text = (
+        f"📊 {name} 님의 스탯 (chat_id={chat_id})\n\n"
+        f"🎯 레벨: {level}\n"
+        f"⭐ 경험치: {xp}\n"
+        f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n"
+        f"💬 메시지 수: {msgs}\n"
+        f"👥 초대 인원(user_stats.invites_count): {invites_db}명\n"
+        f"👥 초대 인원(invite_links 합산): {invites_links}명\n"
+        f"🕒 마지막 일일보상 시각: {last_daily_str}\n"
     )
+
+    await msg.reply_text(text)
 
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -791,7 +866,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
     if not is_owner(user.id):
-        await msg.reply_text("이 명령어는 봇 소유자(OWNER_ID)만 사용할 수 있습니다.")
+        await msg.reply_text("OWNER만 사용할 수 있습니다.")
         return
 
     if MAIN_CHAT_ID == 0:
@@ -812,15 +887,14 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await msg.reply_text(
-        f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 에 대한 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
-        f"(영향 받은 레코드 수: {affected}명)"
-    )
+    await msg.reply_text(f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 의 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
+                         f"(영향 받은 유저 수: {affected}명)")
 
 
 # -----------------------
-# Daily Summary
+# Daily summary (23:59 KST)
 # -----------------------
+
 
 async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     if MAIN_CHAT_ID == 0:
@@ -830,7 +904,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT username, first_name, last_name, xp, level
+        SELECT username,first_name,last_name,xp,level
         FROM user_stats
         WHERE chat_id=?
         ORDER BY xp DESC
@@ -853,23 +927,20 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         body = "오늘 기록된 활동/XP 데이터가 없습니다."
     else:
         lines = ["오늘 기준 메인 그룹 XP 상위 10명:\n"]
-        for idx, row in enumerate(rows, start=1):
-            username = row["username"]
-            if username:
-                name = f"@{username}"
+        for i, row in enumerate(rows, start=1):
+            if row["username"]:
+                name = f"@{row['username']}"
             else:
-                name = row["first_name"] or "이름없음"
-
-            xp = row["xp"]
-            level = row["level"]
-            lines.append(f"{idx}. {name} - Lv.{level} ({xp} XP)")
+                fn = row["first_name"] or ""
+                ln = row["last_name"] or ""
+                name = (fn + " " + ln).strip() or "이름없음"
+            lines.append(f"{i}. {name} - Lv.{row['level']} ({row['xp']} XP)")
         lines.append(f"\n총 기록된 유저 수: {total_users}명")
         body = "\n".join(lines)
 
     text = (
         f"📊 Daily XP 요약 (KST 기준)\n"
-        f"{now_kst.strftime('%Y-%m-%d %H:%M')}\n"
-        f"MAIN_CHAT_ID = {MAIN_CHAT_ID}\n\n"
+        f"{now_kst.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"{body}"
     )
 
@@ -884,12 +955,13 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # -----------------------
 
+
 def main():
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # XP 메시지 핸들러
+    # 일반 메시지 → XP
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.Caption) & (~filters.COMMAND),
@@ -897,7 +969,7 @@ def main():
         )
     )
 
-    # 공용 명령어
+    # 기본 명령어
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler(["stats", "xp"], cmd_stats))
@@ -910,6 +982,7 @@ def main():
     # 관리자 명령어
     app.add_handler(CommandHandler("listadmins", cmd_listadmins))
     app.add_handler(CommandHandler("refuser", cmd_refuser))
+    app.add_handler(CommandHandler("userstats", cmd_userstats))
     app.add_handler(CommandHandler("resetxp", cmd_resetxp))
 
     # 초대 추적
