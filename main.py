@@ -451,7 +451,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     base_text = (
         "안녕하세요! Terminal.Fi XP Bot입니다.\n"
-        "메시지를 보내면 XP를 얻고 레벨이 올라갑니다.\n\n"
+        "커뮤니티에서 활동하면 XP를 얻고 레벨이 올라갑니다.\n\n"
         "📌 일반 명령어\n"
         "/stats - 내 스탯\n"
         "/ranking - 경험치 TOP 10\n"
@@ -466,7 +466,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 관리자/OWNER 추가 메뉴
     if is_admin(user.id):
         text += (
-            "\n🔧 관리자 명령어 (가능하면 DM에서 사용 권장)\n"
+            "\n🔧 관리자 명령어 (DM에서 사용 권장)\n"
             "/chatid - 이 채팅의 ID 확인\n"
             "/listadmins - 관리자 목록\n"
             "/refuser <@handle 또는 user_id> - 특정 유저 초대수\n"
@@ -474,15 +474,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/today - 오늘 기준 메인 그룹 요약(KST)\n"
             "/week - 최근 7일 메인 그룹 요약(KST)\n"
             "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
-            "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록 (DM 전용)\n"
-            "/addxpblock <word> - 키워드 차단 등록 (DM 전용)\n"
-            "/delxpword <word> - 키워드 삭제 (DM 전용)\n"
-            "/listxpwords - 키워드 목록 (DM 전용)\n"
+            "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록\n"
+            "/addxpblock <word> - 키워드 차단 등록)\n"
+            "/delxpword <word> - 키워드 삭제\n"
+            "/listxpwords - 키워드 목록\n"
         )
 
     if is_owner(user.id):
         text += (
-            "\n👑 OWNER 전용 명령어 (DM 전용 권장)\n"
+            "\n😎 OWNER 전용 명령어 (DM 전용 권장)\n"
             "/addadmin <user_id 또는 @handle> - 관리자 추가\n"
             "/deladmin <user_id 또는 @handle> - 관리자 제거\n"
             "/resetxp - 메인 그룹 XP 초기화 (2단계 확인)\n"
@@ -1578,7 +1578,7 @@ def main():
     # 일반 메시지 → XP
     app.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.Caption) & (~filters.COMMAND),
+            filters.TEXT & (~filters.COMMAND),
             handle_message,
         )
     )
