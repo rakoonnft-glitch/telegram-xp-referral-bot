@@ -25,9 +25,13 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "xp_bot.db")
 
+# 메인 그룹 (랭킹·요약 기준)
 MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))  # 0이면 메인 그룹 미지정
+
+# BotFather 로 만든 오너(너) user id
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# 초기 관리자 (쉼표 구분)
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 INITIAL_ADMIN_IDS = set()
 for part in _admin_env.split(","):
@@ -47,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 런타임에 갱신되는 관리자 목록 (DB 기준)
+# 런타임 관리자 목록 (DB 에서 읽어옴)
 ADMIN_USER_IDS: set[int] = set()
 
 
@@ -133,7 +137,7 @@ def init_db():
         """
     )
 
-    # 관리자 테이블 (동적으로 추가/삭제할 때 사용 대비)
+    # 관리자 테이블
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS admin_users (
@@ -142,7 +146,7 @@ def init_db():
         """
     )
 
-    # 초기 관리자 등록 (OWNER 제외, env 기반)
+    # 초기 관리자 등록
     for aid in INITIAL_ADMIN_IDS:
         cur.execute(
             "INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)",
@@ -255,7 +259,7 @@ def add_xp(chat_id: int, user, base_xp: int) -> tuple[int, int, int]:
 
 
 # -----------------------
-# 메시지 핸들러 (일반 XP)
+# 일반 메시지 → XP
 # -----------------------
 
 
@@ -287,7 +291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# 명령어 핸들러 (공용)
+# 공용 명령어
 # -----------------------
 
 
@@ -296,42 +300,48 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /help
+    - 그룹: 일반 유저용 도움말
+    - DM: 일반 도움말 + 관리자면 관리자 섹션 추가
+    """
+    message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
-    msg = update.message
 
-    if chat is None or user is None or msg is None:
+    if message is None or chat is None or user is None:
         return
 
-    base_text = (
-        "안녕하세요! 저는 Terminal.Fi XP 봇입니다.\n"
-        "이 채팅방에서 메시지를 보내면 XP를 얻고 레벨이 올라갑니다다.\n\n"
-        "일반 명령어:\n"
-        "/stats - 내 레벨/XP 확인\n"
-        "/ranking - 상위 10명 랭킹\n"
-        "/daily - 하루 한 번 보너스 XP\n"
-        "/mylink - 나만의 초대 링크 생성 \n"
-        "/refstats - 초대 랭킹 보기 \n"
-    )
-
-    # 그룹/슈퍼그룹에서는 유저용 안내만
-    if chat.type in ("group", "supergroup"):
-        await msg.reply_text(base_text)
-        return
-
-    # DM 에서는 관리자 여부에 따라 다른 내용 추가
-    text = base_text
-
-    if is_admin(user.id):
-        text += (
-            "\n[관리자 전용 명령어]  (DM 에서만 사용 권장)\n"
-            "/chatid - 이 채팅의 ID 확인\n"
-            "/listadmins - 관리자 ID 목록 보기\n"
-            "/resetxp - 메인 그룹의 XP 초기화 (주의)\n"
-            # 이후에 /addadmin, /addkeyword 등 확장 가능
+    try:
+        base_text = (
+            "안녕하세요! 저는 Terminal.Fi XP 봇입니다.\n"
+            "이 채팅방에서 메시지를 보내면 XP를 얻고 레벨이 올라가요.\n\n"
+            "일반 명령어:\n"
+            "/stats - 내 레벨/XP 확인\n"
+            "/ranking - 상위 10명 랭킹\n"
+            "/daily - 하루 한 번 보너스 XP\n"
+            "/mylink - 나만의 초대 링크 생성 (메인 그룹 전용)\n"
+            "/refstats - 초대 랭킹 보기 (메인 그룹 전용)\n"
         )
 
-    await msg.reply_text(text)
+        # 그룹 / 슈퍼그룹이면 그냥 이것만
+        if chat.type in ("group", "supergroup"):
+            await message.reply_text(base_text)
+            return
+
+        # DM 인 경우
+        text = base_text
+        if is_admin(user.id):
+            text += (
+                "\n[관리자 전용 명령어]  (DM 에서만 사용 권장)\n"
+                "/chatid - 이 채팅의 ID 확인\n"
+                "/listadmins - 관리자 ID 목록 보기\n"
+                "/resetxp - 메인 그룹 XP 초기화 (OWNER 전용)\n"
+            )
+
+        await message.reply_text(text)
+    except Exception:
+        logger.exception("/help 처리 중 오류")
 
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -533,6 +543,11 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /mylink
+    - 메인 그룹에서만 사용 가능
+    - 같은 유저가 여러 번 써도, 기존에 만든 초대 링크를 계속 재사용
+    """
     chat = update.effective_chat
     user = update.effective_user
     bot = context.bot
@@ -546,10 +561,36 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_main_chat(chat.id):
         await update.message.reply_text(
-            "이 봇의 레퍼럴 시스템은 Terminal.Fi 커뮤니티에서만 사용할 수 있습니다."
+            "이 봇의 레퍼럴 시스템은 지정된 메인 그룹에서만 사용할 수 있습니다."
         )
         return
 
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 1) 이미 이 유저가 이 채팅에서 쓴 초대링크가 있는지 먼저 확인
+    cur.execute(
+        """
+        SELECT invite_link FROM invite_links
+        WHERE chat_id = ? AND inviter_id = ?
+        LIMIT 1
+        """,
+        (chat.id, user.id),
+    )
+    row = cur.fetchone()
+
+    if row:
+        # 있다 → 그 링크 그대로 재사용
+        link_url = row["invite_link"]
+        conn.close()
+        await update.message.reply_text(
+            "👥 이미 생성된 나만의 초대 링크가 있습니다!\n"
+            "이 링크를 계속 사용해 주세요.\n\n"
+            f"{link_url}"
+        )
+        return
+
+    # 2) 없으면 새로 생성
     try:
         invite: ChatInviteLink = await bot.create_chat_invite_link(
             chat_id=chat.id,
@@ -557,6 +598,7 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
             creates_join_request=False,
         )
     except Exception:
+        conn.close()
         logger.exception("초대 링크 생성 실패")
         await update.message.reply_text(
             "초대 링크를 생성할 수 없습니다.\n"
@@ -564,8 +606,6 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    conn = get_conn()
-    cur = conn.cursor()
     cur.execute(
         """
         INSERT OR REPLACE INTO invite_links
@@ -899,7 +939,7 @@ async def main():
     application.add_handler(CommandHandler("mylink", cmd_mylink))
     application.add_handler(CommandHandler("refstats", cmd_refstats))
 
-    # 관리자용 명령어
+    # 관리자용
     application.add_handler(CommandHandler("listadmins", cmd_listadmins))
     application.add_handler(CommandHandler("resetxp", cmd_resetxp))
 
@@ -911,7 +951,7 @@ async def main():
         )
     )
 
-    # 매일 23:59 KST (14:59 UTC)에 요약 전송
+    # 매일 23:59 KST (UTC 14:59)에 요약 전송
     kst_daily_time_utc = time(hour=14, minute=59, tzinfo=timezone.utc)
     application.job_queue.run_daily(
         send_daily_summary,
