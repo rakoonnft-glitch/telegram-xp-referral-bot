@@ -195,7 +195,7 @@ def init_db():
     for aid in INITIAL_ADMIN_IDS:
         cur.execute("INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)", (aid,))
 
-    # 기본 차단 키워드 (예시): ㅋㅋ, ㄱㄱ
+    # 기본 키워드(리스트용): ㅋㅋ, ㄱㄱ
     cur.execute(
         "INSERT OR IGNORE INTO xp_keywords (word, mode, delta) VALUES (?, 'block', 0)",
         ("ㅋㅋ",),
@@ -364,6 +364,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = text.strip()
     no_space = "".join(ch for ch in raw if not ch.isspace())
 
+    # 0) 특수 케이스: ㅋㅋㅋ / ㄱㄱ가 "단독"일 때 (공백 제거 후 전부 ㅋ 또는 전부 ㄱ)
+    only_kek = bool(no_space) and all(ch == "ㅋ" for ch in no_space)
+    only_gg = bool(no_space) and all(ch == "ㄱ" for ch in no_space)
+    only_kek_or_gg = only_kek or only_gg
+
     # 기본 XP (메시지 길이 기반)
     base_xp = 3 + len(no_space) // 20
 
@@ -375,24 +380,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_emoji_only(text):
         base_xp = 0
 
-    # 3) 키워드 기반 보너스/차단
+    # 3) 단독 ㅋㅋ / 단독 ㄱㄱ → XP 0 (길이에 상관없이)
+    if only_kek_or_gg:
+        base_xp = 0
+
+    # 4) 키워드 기반 보너스/차단
     keywords = get_xp_keywords()
     lower_text = text.lower()
     blocked = False
     bonus_total = 0
 
-    for row in keywords:
-        word = row["word"]
-        mode = row["mode"]
-        delta = row["delta"] or 0
+    # 단독 ㅋㅋ / ㄱㄱ 는 위에서 이미 처리했으므로
+    # 키워드 블록/보너스 로직에서는 더 이상 영향을 주지 않도록 한다.
+    if not only_kek_or_gg:
+        for row in keywords:
+            word = row["word"]
+            mode = row["mode"]
+            delta = row["delta"] or 0
 
-        if not word:
-            continue
-        if word.lower() in lower_text:
-            if mode == "block":
-                blocked = True
-            elif mode == "bonus":
-                bonus_total += delta
+            if not word:
+                continue
+
+            # ㅋㅋ / ㄱㄱ 는 여기서는 스킵 (단독일 때만 처리)
+            if word in ("ㅋㅋ", "ㄱㄱ"):
+                continue
+
+            if word.lower() in lower_text:
+                if mode == "block":
+                    blocked = True
+                elif mode == "bonus":
+                    bonus_total += delta
 
     if blocked:
         xp_delta = 0
@@ -475,7 +492,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/week - 최근 7일 메인 그룹 요약(KST)\n"
             "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
             "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록\n"
-            "/addxpblock <word> - 키워드 차단 등록)\n"
+            "/addxpblock <word> - 키워드 차단 등록\n"
             "/delxpword <word> - 키워드 삭제\n"
             "/listxpwords - 키워드 목록\n"
         )
