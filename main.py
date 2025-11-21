@@ -664,41 +664,43 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ranking - 경험치 TOP 10\n"
         "/daily - 일일보상\n"
         "/mylink - 초대 링크 생성 (Terminal.Fi)\n"
-        "/myref 또는 /myinvites - 내 초대 인원\n"
-        "/refranking - 초대 랭킹\n"
+        "/myinvites - 내 초대 인원\n"
+        "/invites_ranking - 초대 랭킹\n"
     )
 
     text = base_text
 
-    if is_admin(user.id):
-        text += (
-            "\n🔧 관리자 명령어 (DM에서 사용 권장)\n"
-            "/chatid <@handle 또는 user_id> - 해당 유저 ID 조회\n"
-            "/listadmins - 관리자 목록\n"
-            "/refuser <@handle 또는 user_id> - 특정 유저 초대수\n"
-            "/userstats <@handle 또는 user_id> - 특정 유저 스탯\n"
-            "/today - 오늘 기준 메인 그룹 요약(KST)\n"
-            "/week - 최근 7일 메인 그룹 요약(KST)\n"
-            "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
-            "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록\n"
-            "/addxpblock <word> - 키워드 차단 등록\n"
-            "/delxpword <word> - 키워드 삭제\n"
-            "/listxpwords - 키워드 목록\n"
-            "/setcooldown <초> - XP 쿨다운 설정\n"
-            "/setdailycap <XP> - 일일 XP 상한 설정\n"
-            "/setinvxp <XP> - 초대 1명당 XP 설정\n"
-            "/setcampaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
-            "/clearcampaign - 캠페인 기간 초기화\n"
-            "/add_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 수동 지급\n"
-        )
+    # 그룹에서는 관리자도 유저와 동일하게 일반 명령어만 표시
+    if is_private_chat(chat):
+        if is_admin(user.id):
+            text += (
+                "\n🔧 관리자 명령어 (DM에서 사용 권장)\n"
+                "/chatid <@handle 또는 user_id> - 해당 유저 ID 조회\n"
+                "/listadmins - 관리자 목록\n"
+                "/refuser <@handle 또는 user_id> - 특정 유저 초대수\n"
+                "/userstats <@handle 또는 user_id> - 특정 유저 스탯\n"
+                "/today - 오늘 기준 메인 그룹 요약(KST)\n"
+                "/week - 최근 7일 메인 그룹 요약(KST)\n"
+                "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
+                "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록\n"
+                "/addxpblock <word> - 키워드 차단 등록\n"
+                "/delxpword <word> - 키워드 삭제\n"
+                "/listxpwords - 키워드 목록\n"
+                "/setcooldown <초> - XP 쿨다운 설정\n"
+                "/setdailycap <XP> - 일일 XP 상한 설정\n"
+                "/setinvxp <XP> - 초대 1명당 XP 설정\n"
+                "/setcampaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
+                "/clearcampaign - 캠페인 기간 초기화\n"
+                "/add_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 수동 지급\n"
+            )
 
-    if is_owner(user.id):
-        text += (
-            "\n😎 OWNER 전용 명령어 (DM 전용 권장)\n"
-            "/addadmin <user_id 또는 @handle> - 관리자 추가\n"
-            "/deladmin <user_id 또는 @handle> - 관리자 제거\n"
-            "/resetxp total - 메인 그룹 XP 전체 초기화 (2단계 확인, 백업 후 진행)\n"
-        )
+        if is_owner(user.id):
+            text += (
+                "\n😎 OWNER 전용 명령어 (DM 전용 권장)\n"
+                "/addadmin <user_id 또는 @handle> - 관리자 추가\n"
+                "/deladmin <user_id 또는 @handle> - 관리자 제거\n"
+                "/resetxp total - 메인 그룹 XP 전체 초기화 (2단계 확인, 백업 후 진행)\n"
+            )
 
     await message.reply_text(text)
 
@@ -774,7 +776,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - 총 XP, 레벨, 메시지 수
     - 이번 달 XP, 지난 달 XP
     - 캠페인 XP (설정된 경우)
-    초대 인원(invites_count)는 표기하지 않음 (/myref에서만 확인)
+    초대 인원(invites_count)는 표기하지 않음 (/myinvites에서만 확인)
     """
     chat = update.effective_chat
     user = update.effective_user
@@ -836,7 +838,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             campaign_xp = None
 
     text = (
-        f"📊 {user.full_name} 님의 통계 (chat_id={chat_id})\n\n"
+        f"📊 {user.full_name} 님의 통계\n\n"
         f"🎯 레벨: {level}\n"
         f"⭐ 총 경험치(Total XP): {xp}\n"
         f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n"
@@ -982,7 +984,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# /mylink & 초대 랭킹
+# /mylink & 초대 관련
 # -----------------------
 
 
@@ -1047,9 +1049,9 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_myref(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_myinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /myref, /myinvites:
+    /myinvites:
     - 그룹/DM 모두 사용 가능
     - MAIN_CHAT_ID 기준으로 초대 인원 집계
     """
@@ -1060,9 +1062,9 @@ async def cmd_myref(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"👥 현재까지 내 초대 링크로 들어온 인원은 총 {count}명입니다.")
 
 
-async def cmd_refranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /refranking:
+    /invites_ranking:
     - 초대 랭킹 TOP 10 (메인 그룹 기준)
     """
     chat = update.effective_chat
@@ -1437,7 +1439,7 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             campaign_xp = None
 
     text = (
-        f"📊 {name} 님의 스탯 (chat_id={chat_id})\n\n"
+        f"📊 {name} 님의 스탯\n\n"
         f"🎯 레벨: {level}\n"
         f"⭐ 총 경험치(Total XP): {xp}\n"
         f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n"
@@ -2261,8 +2263,8 @@ def main():
     app.add_handler(CommandHandler(["ranking", "rank"], cmd_ranking))
     app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("mylink", cmd_mylink))
-    app.add_handler(CommandHandler(["myref", "myinvites"], cmd_myref))
-    app.add_handler(CommandHandler("refranking", cmd_refranking))
+    app.add_handler(CommandHandler("myinvites", cmd_myinvites))
+    app.add_handler(CommandHandler("invites_ranking", cmd_invites_ranking))
 
     # 관리자 / OWNER 명령어
     app.add_handler(CommandHandler("listadmins", cmd_listadmins))
