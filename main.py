@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import shutil
 from datetime import datetime, timedelta, time, timezone, date
 from math import sqrt
 
@@ -473,7 +474,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stats - 내 스탯\n"
         "/ranking - 경험치 TOP 10\n"
         "/daily - 일일보상\n"
-        "/mylink - 초대 링크 생성 (메인 그룹)\n"
+        "/mylink - 초대 링크 생성 (Terminal.Fi)\n"
         "/myref - 내 초대 인원\n"
         "/refstats - 초대 랭킹\n"
     )
@@ -495,6 +496,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/addxpblock <word> - 키워드 차단 등록\n"
             "/delxpword <word> - 키워드 삭제\n"
             "/listxpwords - 키워드 목록\n"
+            "/exportdata - XP DB 파일 내보내기\n"
+            "/backupdata - 서버에 DB 백업 생성\n"
         )
 
     if is_owner(user.id):
@@ -603,6 +606,11 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /daily 는 KST 자정 기준으로 하루 1회만 수령 가능하도록 구현
+    - last_daily 에는 'YYYY-MM-DD' 형식으로 KST 날짜 문자열 저장
+    - 이전 버전(ISO datetime 저장)도 안전하게 처리
+    """
     chat = update.effective_chat
     user = update.effective_user
     msg = update.message
@@ -616,10 +624,13 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     row = cur.fetchone()
 
-    now = datetime.utcnow()
+    # KST 기준 현재 날짜
+    now_kst = datetime.utcnow() + timedelta(hours=9)
+    today_str = now_kst.date().isoformat()
     bonus = 50
 
     if not row:
+        # 첫 일일 보상
         cur.execute(
             """
             INSERT INTO user_stats
@@ -635,35 +646,52 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 bonus,
                 calc_level(bonus),
                 0,
-                now.isoformat(),
+                today_str,  # 날짜만 저장
             ),
         )
         conn.commit()
         conn.close()
-        await msg.reply_text(f"🎁 첫 일일 보상으로 {bonus} XP를 받았습니다!")
+        await msg.reply_text(f"🎁 첫 일일 보상으로 {bonus} XP를 받았습니다! (KST 기준)")
         return
 
     last = row["last_daily"]
-    if last:
-        last_dt = datetime.fromisoformat(last)
-        if now - last_dt < timedelta(hours=24):
-            remain = timedelta(hours=24) - (now - last_dt)
-            h = remain.seconds // 3600
-            m = (remain.seconds % 3600) // 60
-            await msg.reply_text(f"⏰ 이미 오늘 보상을 받았습니다.\n{h}시간 {m}분 후에 다시 시도해 주세요.")
-            conn.close()
-            return
+    last_date_str = None
 
+    if last:
+        try:
+            if "T" in last:
+                # 예전 버전: ISO datetime 이 저장된 경우 → KST로 변환 후 날짜만 사용
+                dt = datetime.fromisoformat(last)
+                dt_kst = dt + timedelta(hours=9)
+                last_date_str = dt_kst.date().isoformat()
+            else:
+                # 이미 날짜 문자열 형식인 경우
+                last_date_str = date.fromisoformat(last).isoformat()
+        except Exception:
+            last_date_str = None
+
+    if last_date_str == today_str:
+        # 이미 오늘 수령함
+        await msg.reply_text(
+            "⏰ 이미 오늘(KST 기준) 일일 보상을 받았습니다.\n"
+            "KST 기준 자정(00:00) 이후에 다시 시도해 주세요."
+        )
+        conn.close()
+        return
+
+    # 오늘 첫 수령 → XP 지급
     xp = row["xp"] + bonus
     level = calc_level(xp)
     cur.execute(
         "UPDATE user_stats SET xp=?,level=?,last_daily=? WHERE chat_id=? AND user_id=?",
-        (xp, level, now.isoformat(), chat.id, user.id),
+        (xp, level, today_str, chat.id, user.id),
     )
     conn.commit()
     conn.close()
 
-    await msg.reply_text(f"🎁 일일 보상으로 {bonus} XP를 받았습니다!\n현재 XP: {xp}, 레벨: {level}")
+    await msg.reply_text(
+        f"🎁 일일 보상으로 {bonus} XP를 받았습니다! (KST 기준)\n현재 XP: {xp}, 레벨: {level}"
+    )
 
 
 # -----------------------
@@ -733,11 +761,15 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_myref(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /myref 는 그룹/DM 모두 사용 가능.
+    MAIN_CHAT_ID 기준 초대 인원 합산 결과를 보여줌.
+    """
     user = update.effective_user
     msg = update.message
     count = get_invite_count_for_user(user.id)
 
-    await msg.reply_text(f"👥 현재까지 내 초대 링크로 들어온 인원은 총 {count}명입니다.")
+    await msg.reply_text(f"👥 현재까지 내 초대 인원은 총 {count}명입니다.")
 
 
 async def cmd_refstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1075,7 +1107,14 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     last_daily = row["last_daily"]
     if last_daily:
-        last_daily_str = datetime.fromisoformat(last_daily).strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            if "T" in last_daily:
+                dt = datetime.fromisoformat(last_daily)
+                last_daily_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+            else:
+                last_daily_str = last_daily
+        except Exception:
+            last_daily_str = last_daily
     else:
         last_daily_str = "기록 없음"
 
@@ -1087,7 +1126,7 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💬 메시지 수: {msgs}\n"
         f"👥 초대 인원(user_stats.invites_count): {invites_db}명\n"
         f"👥 초대 인원(invite_links 합산): {invites_links}명\n"
-        f"🕒 마지막 일일보상 시각: {last_daily_str}\n"
+        f"🕒 마지막 일일보상 시각/날짜: {last_daily_str}\n"
     )
 
     await msg.reply_text(text)
@@ -1099,7 +1138,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     OWNER 전용.
     - 처음 호출: 경고 + 사용법 안내
     - '/resetxp 동의합니다.' 로 다시 호출했을 때만 실제 초기화 수행
-    - 초기화 직전 스냅샷을 OWNER 및 관리자 DM 으로 보내고 그 후 리셋 안내
+    - 초기화 직전 스냅샷을 관리자 DM 으로 전송
     """
     user = update.effective_user
     msg = update.message
@@ -1178,18 +1217,18 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n총 기록된 유저 수: {total_users}명")
         snapshot_body = "\n".join(lines)
 
-    # OWNER + 관리자 전체 DM 으로 스냅샷 전송
+    # 관리자 / OWNER DM 으로 스냅샷 전송
     for uid in all_admin_targets():
         try:
             await msg.bot.send_message(chat_id=uid, text=snapshot_body)
         except Exception:
-            logger.exception("resetxp 스냅샷 DM 전송 실패 (user_id=%s)", uid)
+            logger.exception("resetxp 스냅샷 DM 전송 실패 (uid=%s)", uid)
 
     # 최종 안내 메시지
     await msg.reply_text(
         f"✅ MAIN_CHAT_ID={MAIN_CHAT_ID} 의 XP/레벨/메시지/초대 기록을 초기화했습니다.\n"
         f"(영향 받은 유저 수: {affected}명)\n"
-        "초기화 직전 스냅샷은 OWNER 및 관리자 DM으로 전송했습니다.",
+        "초기화 직전 스냅샷은 관리자 DM으로 전송했습니다.",
     )
 
 
@@ -1346,6 +1385,79 @@ async def cmd_listxpwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.extend(block_lines)
 
     await msg.reply_text("\n".join(lines))
+
+
+# -----------------------
+# 관리자용 데이터 추출 / 백업
+# -----------------------
+
+
+async def cmd_exportdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /exportdata
+    - 관리자 전용
+    - DM에서만 사용
+    - 현재 DB 파일(xp_bot.db)을 그대로 전송
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용 가능합니다.")
+        return
+    if not is_private_chat(chat):
+        await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용할 수 있습니다.")
+        return
+
+    if not os.path.exists(DB_PATH):
+        await msg.reply_text("DB 파일을 찾을 수 없습니다.")
+        return
+
+    try:
+        await msg.reply_document(
+            document=open(DB_PATH, "rb"),
+            filename=os.path.basename(DB_PATH),
+            caption="현재 XP Bot DB 파일입니다.",
+        )
+    except Exception:
+        logger.exception("exportdata 실패")
+        await msg.reply_text("DB 파일 전송에 실패했습니다.")
+
+
+async def cmd_backupdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /backupdata
+    - 관리자 전용
+    - DM에서만 사용
+    - 서버 로컬에 DB 백업 파일 생성 (파일명: xp_backup_YYYYMMDD_HHMMSS.db)
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용 가능합니다.")
+        return
+    if not is_private_chat(chat):
+        await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용할 수 있습니다.")
+        return
+
+    if not os.path.exists(DB_PATH):
+        await msg.reply_text("DB 파일을 찾을 수 없습니다.")
+        return
+
+    now = datetime.utcnow()
+    backup_name = f"xp_backup_{now.strftime('%Y%m%d_%H%M%S')}.db"
+
+    try:
+        shutil.copy2(DB_PATH, backup_name)
+    except Exception:
+        logger.exception("backupdata 실패")
+        await msg.reply_text("DB 백업 생성에 실패했습니다.")
+        return
+
+    await msg.reply_text(f"✅ DB 백업을 생성했습니다: {backup_name}")
 
 
 # -----------------------
@@ -1624,6 +1736,10 @@ def main():
     app.add_handler(CommandHandler("addxpblock", cmd_addxpblock))
     app.add_handler(CommandHandler("delxpword", cmd_delxpword))
     app.add_handler(CommandHandler("listxpwords", cmd_listxpwords))
+
+    # 데이터 추출 / 백업
+    app.add_handler(CommandHandler("exportdata", cmd_exportdata))
+    app.add_handler(CommandHandler("backupdata", cmd_backupdata))
 
     # 기간 요약
     app.add_handler(CommandHandler("today", cmd_today))
