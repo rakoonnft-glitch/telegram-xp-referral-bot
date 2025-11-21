@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import zipfile
+import random
 from datetime import datetime, timedelta, time, timezone, date
 from math import sqrt
 
@@ -58,6 +59,16 @@ logger = logging.getLogger(__name__)
 
 # 현재 프로세스 메모리에 들고 있는 관리자 목록
 ADMIN_USER_IDS: set[int] = set()
+
+# 간단한 로터리(추첨) 상태 (chat_id 기준)
+# 예: LOTTERY_STATE[chat_id] = {
+#   "active": True,
+#   "participants": set([...]),
+#   "duration": 60,        # 분 단위 (또는 None)
+#   "winners": 3,          # 자동 종료 시 사용할 당첨자 수 (또는 None)
+#   "job": Job 객체 또는 None
+# }
+LOTTERY_STATE: dict[int, dict] = {}
 
 
 def is_owner(user_id: int) -> bool:
@@ -666,6 +677,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mylink - 초대 링크 생성 (Terminal.Fi)\n"
         "/myinvites - 내 초대 인원\n"
         "/invites_ranking - 초대 랭킹\n"
+        "/join - 진행 중인 추첨 참가\n"
     )
 
     text = base_text
@@ -692,6 +704,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/setcampaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
                 "/clearcampaign - 캠페인 기간 초기화\n"
                 "/add_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 수동 지급\n"
+                "/lottery [분] [당첨자수] - 그룹에서 추첨 시작\n"
+                "/lottery_end <인원수> - 추첨 종료 및 당첨자 추첨\n"
             )
 
         if is_owner(user.id):
@@ -2239,6 +2253,286 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
+# 로터리(추첨) 기능
+# -----------------------
+
+
+async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /lottery
+    /lottery <분>
+    /lottery <분> <당첨자수>
+
+    - 관리자만 사용
+    - /lottery           : 시간 제한 없이 추첨 시작 → /lottery_end <인원수> 로 종료
+    - /lottery 60        : 60분 동안만 /join 받기, 이후 자동으로 종료(당첨자 뽑지는 않음)
+    - /lottery 60 3      : 60분 후 자동으로 3명 추첨 및 종료
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+    args = context.args
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("이 명령어는 그룹에서만 사용할 수 있습니다.")
+        return
+
+    state = LOTTERY_STATE.get(chat.id)
+    if state and state.get("active"):
+        await msg.reply_text("이미 진행 중인 추첨이 있습니다. 먼저 기존 추첨을 종료해 주세요.")
+        return
+
+    duration = None
+    winners = None
+
+    if len(args) >= 1:
+        try:
+            duration = int(args[0])
+        except ValueError:
+            await msg.reply_text("시간(분)은 정수로 입력해 주세요. 예: /lottery 60 3")
+            return
+        if duration <= 0:
+            duration = None
+
+    if len(args) >= 2:
+        try:
+            winners = int(args[1])
+        except ValueError:
+            await msg.reply_text("당첨자 수는 정수로 입력해 주세요. 예: /lottery 60 3")
+            return
+        if winners <= 0:
+            await msg.reply_text("당첨자 수는 1명 이상이어야 합니다.")
+            return
+
+    job = None
+    # duration 이 있으면 run_once 스케줄
+    if duration is not None:
+        job = context.job_queue.run_once(
+            auto_end_lottery,
+            when=duration * 60,
+            data={"chat_id": chat.id, "winners": winners},
+            name=f"lottery_{chat.id}",
+        )
+
+    LOTTERY_STATE[chat.id] = {
+        "active": True,
+        "participants": set(),
+        "duration": duration,
+        "winners": winners,
+        "job": job,
+    }
+
+    if duration is None and winners is None:
+        text = (
+            "🎉 추첨을 시작했습니다.\n"
+            "참가자는 /join 을 입력해 주세요.\n\n"
+            "관리자가 /lottery_end <당첨자수> 명령어로 종료 후 당첨자를 뽑을 수 있습니다.\n"
+            "예: /lottery_end 3"
+        )
+    elif duration is not None and winners is None:
+        text = (
+            f"⏳ {duration}분 동안 진행되는 추첨을 시작했습니다.\n"
+            "참가자는 /join 을 입력해 주세요.\n\n"
+            "설정된 시간이 지나면 자동으로 추첨이 종료되며,\n"
+            "관리자가 /lottery_end <당첨자수> 로 당첨자를 뽑을 수 있습니다."
+        )
+    else:
+        # duration, winners 둘 다 있는 경우 (예: /lottery 60 3)
+        text = (
+            f"⏳ {duration}분 동안 진행되는 추첨을 시작했습니다.\n"
+            f"종료 시 자동으로 {winners}명을 추첨합니다.\n"
+            "참가자는 /join 을 입력해 주세요."
+        )
+
+    await msg.reply_text(text)
+
+
+async def cmd_join_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /join
+    - 유저가 현재 진행 중인 추첨에 참가
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    msg = update.message
+
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("이 명령어는 그룹에서만 사용할 수 있습니다.")
+        return
+
+    state = LOTTERY_STATE.get(chat.id)
+    if not state or not state.get("active"):
+        await msg.reply_text("현재 진행 중인 추첨이 없습니다.")
+        return
+
+    participants = state["participants"]
+    if user.id in participants:
+        await msg.reply_text("이미 추첨에 참가하셨습니다.")
+        return
+
+    participants.add(user.id)
+    await msg.reply_text(f"✅ {user.full_name} 님이 추첨에 참가했습니다! (현재 참가 인원: {len(participants)}명)")
+
+
+async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /lottery_end <당첨자수>
+
+    - 관리자만 사용
+    - /lottery 또는 /lottery 60 으로 시작한 경우: 이 명령어로 종료 + 추첨
+    - /lottery 60 3 으로 시작했더라도, 시간이 되기 전에 수동으로 종료하고 싶으면 이 명령어 사용 가능
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+    args = context.args
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("이 명령어는 그룹에서만 사용할 수 있습니다.")
+        return
+
+    if not args:
+        await msg.reply_text("사용법: /lottery_end <당첨자수>\n예: /lottery_end 3")
+        return
+
+    try:
+        winners = int(args[0])
+    except ValueError:
+        await msg.reply_text("당첨자 수는 정수로 입력해 주세요. 예: /lottery_end 3")
+        return
+
+    if winners <= 0:
+        await msg.reply_text("당첨자 수는 1명 이상이어야 합니다.")
+        return
+
+    state = LOTTERY_STATE.get(chat.id)
+    if not state:
+        await msg.reply_text("진행 중인 추첨이 없습니다.")
+        return
+
+    participants = list(state.get("participants", set()))
+    if not participants:
+        await msg.reply_text("추첨 참가자가 없습니다.")
+        LOTTERY_STATE.pop(chat.id, None)
+        return
+
+    # 예약된 자동 종료 job 이 있으면 취소
+    job = state.get("job")
+    if job is not None:
+        try:
+            job.schedule_removal()
+        except Exception:
+            pass
+
+    num = min(len(participants), winners)
+    chosen_ids = random.sample(participants, num)
+
+    winners_texts = []
+    for uid in chosen_ids:
+        try:
+            member = await context.bot.get_chat_member(chat.id, uid)
+            u = member.user
+            if u.username:
+                name = f"@{u.username}"
+            else:
+                name = u.full_name or str(uid)
+        except Exception:
+            name = str(uid)
+        winners_texts.append(f"- {name}")
+
+    LOTTERY_STATE.pop(chat.id, None)
+
+    text = (
+        f"🎉 추첨이 종료되었습니다.\n"
+        f"총 참가자 수: {len(participants)}명\n"
+        f"당첨자 수: {num}명\n\n"
+        "🏆 당첨자:\n" + "\n".join(winners_texts)
+    )
+    await msg.reply_text(text)
+
+
+async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
+    """
+    run_once 로 호출되는 자동 종료 콜백
+    - winners 가 None 이면: 추첨만 종료하고, 관리자가 /lottery_end 로 수동 추첨
+    - winners 가 있으면: 자동으로 winners 명 추첨 후 종료
+    """
+    job = context.job
+    data = job.data or {}
+    chat_id = data.get("chat_id")
+    winners = data.get("winners")
+
+    if chat_id is None:
+        return
+
+    state = LOTTERY_STATE.get(chat_id)
+    if not state:
+        return
+
+    participants = list(state.get("participants", set()))
+
+    # 더 이상 active 아님
+    state["active"] = False
+    state["job"] = None
+
+    if not participants:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏰ 추첨 시간이 종료되었지만 참가자가 없습니다.",
+        )
+        LOTTERY_STATE.pop(chat_id, None)
+        return
+
+    # winners 가 설정되지 않은 경우: 추첨은 종료하지만, 실제 당첨자는 /lottery_end 에서 뽑도록
+    if winners is None:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⏰ 설정된 시간이 지나 추첨이 종료되었습니다.\n"
+                "관리자가 /lottery_end <당첨자수> 로 당첨자를 뽑을 수 있습니다.\n"
+                "예: /lottery_end 3"
+            ),
+        )
+        # 참가자 목록은 유지해서 나중에 /lottery_end 에서 사용
+        return
+
+    # winners 가 지정된 경우: 자동으로 추첨까지 진행
+    num = min(len(participants), winners)
+    chosen_ids = random.sample(participants, num)
+
+    winners_texts = []
+    for uid in chosen_ids:
+        try:
+            member = await context.bot.get_chat_member(chat_id, uid)
+            u = member.user
+            if u.username:
+                name = f"@{u.username}"
+            else:
+                name = u.full_name or str(uid)
+        except Exception:
+            name = str(uid)
+        winners_texts.append(f"- {name}")
+
+    LOTTERY_STATE.pop(chat_id, None)
+
+    text = (
+        f"⏰ 설정된 시간이 지나 추첨이 자동 종료되었습니다.\n"
+        f"총 참가자 수: {len(participants)}명\n"
+        f"당첨자 수: {num}명\n\n"
+        "🏆 당첨자:\n" + "\n".join(winners_texts)
+    )
+    await context.bot.send_message(chat_id=chat_id, text=text)
+
+
+# -----------------------
 # MAIN
 # -----------------------
 
@@ -2265,6 +2559,11 @@ def main():
     app.add_handler(CommandHandler("mylink", cmd_mylink))
     app.add_handler(CommandHandler("myinvites", cmd_myinvites))
     app.add_handler(CommandHandler("invites_ranking", cmd_invites_ranking))
+
+    # 로터리(추첨)
+    app.add_handler(CommandHandler("lottery", cmd_lottery))
+    app.add_handler(CommandHandler("join", cmd_join_lottery))
+    app.add_handler(CommandHandler("lottery_end", cmd_lottery_end))
 
     # 관리자 / OWNER 명령어
     app.add_handler(CommandHandler("listadmins", cmd_listadmins))
