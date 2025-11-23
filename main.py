@@ -96,6 +96,36 @@ def is_private_chat(chat) -> bool:
     return chat and chat.type == "private"
 
 
+# ✅ 그룹 관리자 OR DB 관리자 OR OWNER 판정
+async def is_chat_admin_or_bot_admin(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """
+    - DB 관리자(or OWNER)이면 True
+    - 아니면, 해당 그룹에서 status 가 creator/administrator 인지 확인
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat:
+        return False
+
+    # DB 관리자 / OWNER 우선
+    if is_admin(user.id):
+        return True
+
+    # 그룹/슈퍼그룹 관리자 체크
+    if chat.type in ("group", "supergroup"):
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if member.status in ("creator", "administrator"):
+                return True
+        except Exception:
+            logger.exception("get_chat_member 실패 (chat_id=%s, user_id=%s)", chat.id, user.id)
+
+    return False
+
+
 # -----------------------
 # DB 유틸
 # -----------------------
@@ -2263,7 +2293,7 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /lottery <분>
     /lottery <분> <당첨자수>
 
-    - 관리자만 사용
+    - 그룹 관리자 + DB 관리자 + OWNER만 사용
     - /lottery           : 시간 제한 없이 추첨 시작 → /lottery_end <인원수> 로 종료
     - /lottery 60        : 60분 동안만 /join 받기, 이후 자동으로 종료(당첨자 뽑지는 않음)
     - /lottery 60 3      : 60분 후 자동으로 3명 추첨 및 종료
@@ -2273,11 +2303,11 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     args = context.args
 
-    # ✅ 항상 최신 관리자 목록 다시 로드 (DB → 메모리)
+    # DB 관리자 목록 최신화
     reload_admins()
 
-    # ✅ 관리자 체크
-    if not is_admin(user.id):
+    # ✅ 그룹 관리자 or DB 관리자 or OWNER 판정
+    if not await is_chat_admin_or_bot_admin(update, context):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
 
@@ -2384,7 +2414,7 @@ async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /lottery_end <당첨자수>
 
-    - 관리자만 사용
+    - 그룹 관리자 + DB 관리자 + OWNER만 사용
     - /lottery 또는 /lottery 60 으로 시작한 경우: 이 명령어로 종료 + 추첨
     - /lottery 60 3 으로 시작했더라도, 시간이 되기 전에 수동으로 종료하고 싶으면 이 명령어 사용 가능
     """
@@ -2393,7 +2423,11 @@ async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     args = context.args
 
-    if not is_admin(user.id):
+    # DB 관리자 목록 최신화
+    reload_admins()
+
+    # ✅ 그룹 관리자 or DB 관리자 or OWNER 판정
+    if not await is_chat_admin_or_bot_admin(update, context):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
 
