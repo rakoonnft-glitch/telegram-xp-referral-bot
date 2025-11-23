@@ -792,7 +792,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = base_text
 
+    # DM일 때만 관리/OWNER 명령어 안내
     if is_private_chat(chat):
+        # 관리자(OWNER 포함)는 관리자 명령어 섹션 노출
         if is_admin(user.id):
             text += (
                 "\n🔧 관리자 명령어 (DM에서 사용 권장)\n"
@@ -800,9 +802,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/list_admins - 관리자 목록\n"
                 "/ref_user <@handle 또는 user_id> - 특정 유저 초대수\n"
                 "/user_stats <@handle 또는 user_id> - 특정 유저 스탯\n"
-                "/today - 오늘 기준 메인 그룹 요약(KST)\n"
-                "/week - 최근 7일 메인 그룹 요약(KST)\n"
-                "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
                 "/add_xp_bonus <word> <xp> - 키워드 보너스 XP 등록\n"
                 "/add_xp_block <word> - 키워드 차단 등록\n"
                 "/del_xp_word <word> - 키워드 삭제\n"
@@ -822,15 +821,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/lottery_end <인원수> - 추첨 종료 및 당첨자 추첨\n"
             )
 
+        # ✅ OWNER 전용 섹션: 여기에서만 /today /week /range 보임
         if is_owner(user.id):
             text += (
                 "\n😎 OWNER 전용 명령어 (DM 전용 권장)\n"
+                "/today - 오늘 기준 메인 그룹 요약(KST)\n"
+                "/week - 최근 7일 메인 그룹 요약(KST)\n"
+                "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
                 "/add_admin <user_id 또는 @handle> - 관리자 추가\n"
                 "/del_admin <user_id 또는 @handle> - 관리자 제거\n"
                 "/reset_xp total - 메인 그룹 XP 전체 초기화 (2단계 확인, 백업 후 진행)\n"
             )
 
     await message.reply_text(text)
+
 
 
 # -----------------------
@@ -2319,9 +2323,11 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.message
 
-    if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 있습니다.")
+    # ✅ OWNER-only
+    if not is_owner(user.id):
+        await msg.reply_text("OWNER만 사용할 수 있습니다.")
         return
+    # ✅ DM 전용
     if not is_private_chat(chat):
         await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용해 주세요.")
         return
@@ -2338,9 +2344,11 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.message
 
-    if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 있습니다.")
+    # ✅ OWNER-only
+    if not is_owner(user.id):
+        await msg.reply_text("OWNER만 사용할 수 있습니다.")
         return
+    # ✅ DM 전용
     if not is_private_chat(chat):
         await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용해 주세요.")
         return
@@ -2359,9 +2367,11 @@ async def cmd_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     args = context.args
 
-    if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 없습니다.")
+    # ✅ OWNER-only
+    if not is_owner(user.id):
+        await msg.reply_text("OWNER만 사용할 수 있습니다.")
         return
+    # ✅ DM 전용
     if not is_private_chat(chat):
         await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용해 주세요.")
         return
@@ -2436,29 +2446,35 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         f"{body}"
     )
 
-    for uid in all_admin_targets():
+    # ✅ OWNER에게만 전송
+    if OWNER_ID:
         try:
-            await context.bot.send_message(chat_id=uid, text=text)
+            await context.bot.send_message(chat_id=OWNER_ID, text=text)
         except Exception:
-            logger.exception("daily summary DM 실패 (user_id=%s)", uid)
+            logger.exception("daily summary DM 실패 (OWNER_ID=%s)", OWNER_ID)
 
 
 async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
+    """
+    매일 자동 DB 백업 → OWNER에게만 ZIP 파일 DM
+    """
     try:
         zip_path = backup_db_to_zip()
     except Exception:
         logger.exception("자동 백업 zip 생성 실패")
         return
 
-    for uid in all_admin_targets():
+    if OWNER_ID:
         try:
-            await context.bot.send_document(
-                chat_id=uid,
-                document=open(zip_path, "rb"),
-                caption="📦 Daily 자동 백업 파일입니다.",
-            )
+            with open(zip_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=OWNER_ID,
+                    document=f,
+                    caption="📦 Daily 자동 백업 파일입니다.",
+                )
         except Exception:
-            logger.exception("daily backup DM 실패 (user_id=%s)", uid)
+            logger.exception("daily backup DM 실패 (OWNER_ID=%s)", OWNER_ID)
+
 
 
 # -----------------------
