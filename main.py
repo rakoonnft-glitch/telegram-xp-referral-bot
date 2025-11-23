@@ -997,7 +997,7 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT username, first_name, last_name, xp, level
+        SELECT user_id, username, first_name, last_name, xp, level
         FROM user_stats
         WHERE chat_id=?
         ORDER BY xp DESC
@@ -1009,7 +1009,7 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not rows:
-        await update.message.reply_text("아직 데이터가 없습니다.")
+        await update.message.reply_text("📊 아직 랭킹 데이터가 없습니다.")
         return
 
     lines = ["🏆 경험치 TOP 10\n"]
@@ -1017,15 +1017,18 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, row in enumerate(rows, start=1):
         username = row["username"]
+
         if username:
-            name = username
+            name = username   # ← @ 제거한 최종 형태
         else:
             fn = row["first_name"] or ""
             ln = row["last_name"] or ""
             name = (fn + " " + ln).strip() or "이름없음"
+
         xp = row["xp"]
         level = row["level"]
         prefix = medals[i - 1] if i <= 3 else f"{i}."
+
         lines.append(f"{prefix} {name} - Lv.{level} ({xp} XP)")
 
     await update.message.reply_text("\n".join(lines))
@@ -1194,16 +1197,16 @@ async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat = update.effective_chat
 
     if not is_main_chat(chat.id):
-        await update.message.reply_text("초대 랭킹은 메인 그룹에서만 확인할 수 있습니다.")
+        await update.message.reply_text("📨 초대 랭킹은 메인 그룹에서만 확인할 수 있습니다.")
         return
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT username,first_name,last_name,invites_count
+        SELECT user_id, username, first_name, last_name, invites_count
         FROM user_stats
-        WHERE chat_id=? AND invites_count>0
+        WHERE chat_id=? AND invites_count > 0
         ORDER BY invites_count DESC
         LIMIT 10
         """,
@@ -1213,20 +1216,24 @@ async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.close()
 
     if not rows:
-        await update.message.reply_text("아직 초대 기록이 없습니다.")
+        await update.message.reply_text("📨 초대 기록이 아직 없습니다.")
         return
 
     lines = ["👥 초대 랭킹 TOP 10\n"]
+
     for i, row in enumerate(rows, start=1):
         if row["username"]:
-            name = f"@{row['username']}"
+            name = row["username"]   # ← @ 제거한 최종 버전
         else:
             fn = row["first_name"] or ""
             ln = row["last_name"] or ""
             name = (fn + " " + ln).strip() or "이름없음"
-        lines.append(f"{i}. {name} - {row['invites_count']}명")
+
+        invites = row["invites_count"]
+        lines.append(f"{i}. {name} - {invites}명")
 
     await update.message.reply_text("\n".join(lines))
+
 
 
 # -----------------------
@@ -2724,6 +2731,7 @@ async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = MAIN_CHAT_ID or chat.id
 
+    # 설정 불러오기
     settings = get_settings()
     cs = settings["campaign_start"]
     ce = settings["campaign_end"]
@@ -2732,6 +2740,7 @@ async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("현재 설정된 캠페인 기간이 없습니다. (관리자가 /set_campaign 으로 먼저 설정해야 합니다.)")
         return
 
+    # 날짜 검증
     try:
         cs_date = date.fromisoformat(cs)
         ce_date = date.fromisoformat(ce)
@@ -2739,11 +2748,13 @@ async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("캠페인 기간 설정값이 잘못되어 있습니다. 관리자에게 문의해 주세요.")
         return
 
+    # KST → UTC 변환
     cs_kst = datetime.combine(cs_date, time(0, 0))
     ce_kst = datetime.combine(ce_date + timedelta(days=1), time(0, 0))
     cs_utc = cs_kst - timedelta(hours=9)
     ce_utc = ce_kst - timedelta(hours=9)
 
+    # DB 조회
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2769,20 +2780,24 @@ async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("캠페인 기간 동안 XP 기록이 없습니다.")
         return
 
+    # 출력 구성
     lines = [
         "🏁 캠페인 XP 랭킹\n",
         f"기간 (KST): {cs_date.isoformat()} ~ {ce_date.isoformat()}\n",
     ]
+
     for i, row in enumerate(rows, start=1):
         if row["username"]:
-            name = f"@{row['username']}"
+            name = row["username"]   # ← @ 제거 완료
         else:
             fn = row["first_name"] or ""
             ln = row["last_name"] or ""
             name = (fn + " " + ln).strip() or f"user_id {row['user_id']}"
+
         lines.append(f"{i}. {name} - {row['total_xp']} XP")
 
     await msg.reply_text("\n".join(lines))
+
 
 
 # -----------------------
