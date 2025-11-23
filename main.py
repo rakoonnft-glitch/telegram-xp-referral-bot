@@ -26,15 +26,15 @@ from telegram.ext import (
 # -----------------------
 # .env 로드 & 기본 설정
 # -----------------------
-load_dotenv()  # .env 파일 읽기
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "xp_bot.db")
 
 # 메인 그룹 (랭킹/요약 기준 채팅)
-MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))  # 0이면 미지정
+MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))
 
-# Bot owner (BotFather로 만든 계정)
+# Bot owner
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # 최초 관리자 목록 (.env의 ADMIN_USER_IDS)
@@ -61,13 +61,6 @@ logger = logging.getLogger(__name__)
 ADMIN_USER_IDS: set[int] = set()
 
 # 간단한 로터리(추첨) 상태 (chat_id 기준)
-# 예: LOTTERY_STATE[chat_id] = {
-#   "active": True,
-#   "participants": set([...]),
-#   "duration": 60,        # 분 단위 (또는 None)
-#   "winners": 3,          # 자동 종료 시 사용할 당첨자 수 (또는 None)
-#   "job": Job 객체 또는 None
-# }
 LOTTERY_STATE: dict[int, dict] = {}
 
 
@@ -96,41 +89,9 @@ def is_private_chat(chat) -> bool:
     return chat and chat.type == "private"
 
 
-# ✅ 그룹 관리자 OR DB 관리자 OR OWNER 판정
-async def is_chat_admin_or_bot_admin(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> bool:
-    """
-    - DB 관리자(or OWNER)이면 True
-    - 아니면, 해당 그룹에서 status 가 creator/administrator 인지 확인
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if not user or not chat:
-        return False
-
-    # DB 관리자 / OWNER 우선
-    if is_admin(user.id):
-        return True
-
-    # 그룹/슈퍼그룹 관리자 체크
-    if chat.type in ("group", "supergroup"):
-        try:
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if member.status in ("creator", "administrator"):
-                return True
-        except Exception:
-            logger.exception("get_chat_member 실패 (chat_id=%s, user_id=%s)", chat.id, user.id)
-
-    return False
-
-
 # -----------------------
 # DB 유틸
 # -----------------------
-
-
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -152,9 +113,6 @@ def reload_admins():
 def ensure_user_stats_columns(cur):
     """
     기존 DB에 새로운 컬럼 추가 (이미 있으면 skip)
-    - last_xp_at    : 마지막 XP 부여 시각(UTC ISO)
-    - daily_xp      : 마지막 일자 기준 오늘 누적 XP
-    - daily_xp_date : 일일 XP 기준 날짜(KST, YYYY-MM-DD)
     """
     cur.execute("PRAGMA table_info(user_stats)")
     cols = {row["name"] for row in cur.fetchall()}
@@ -165,6 +123,24 @@ def ensure_user_stats_columns(cur):
         cur.execute("ALTER TABLE user_stats ADD COLUMN daily_xp INTEGER DEFAULT 0")
     if "daily_xp_date" not in cols:
         cur.execute("ALTER TABLE user_stats ADD COLUMN daily_xp_date TEXT")
+
+
+def ensure_bot_settings_columns(cur):
+    """
+    bot_settings 테이블에 봇 on/off 및 운영 시간 컬럼이 없으면 추가
+    - bot_active        : 1=동작, 0=중지
+    - active_start_hour : 매일 시작 시각(KST, 시 단위)
+    - active_end_hour   : 매일 종료 시각(KST, 시 단위)
+    """
+    cur.execute("PRAGMA table_info(bot_settings)")
+    cols = {row["name"] for row in cur.fetchall()}
+
+    if "bot_active" not in cols:
+        cur.execute("ALTER TABLE bot_settings ADD COLUMN bot_active INTEGER DEFAULT 1")
+    if "active_start_hour" not in cols:
+        cur.execute("ALTER TABLE bot_settings ADD COLUMN active_start_hour INTEGER")
+    if "active_end_hour" not in cols:
+        cur.execute("ALTER TABLE bot_settings ADD COLUMN active_end_hour INTEGER")
 
 
 def init_db():
@@ -234,13 +210,13 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS xp_keywords (
             word TEXT PRIMARY KEY,
-            mode TEXT NOT NULL,   -- 'bonus' 또는 'block'
+            mode TEXT NOT NULL,
             delta INTEGER DEFAULT 0
         )
         """
     )
 
-    # XP 로그 (기간 통계용)
+    # XP 로그
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS xp_log (
@@ -254,7 +230,7 @@ def init_db():
         """
     )
 
-    # 봇 설정값 (안티스팸, 초대 XP, 캠페인 기간 등)
+    # 봇 설정값
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS bot_settings (
@@ -263,19 +239,23 @@ def init_db():
             daily_xp_cap INTEGER DEFAULT 500,
             invite_xp INTEGER DEFAULT 100,
             campaign_start TEXT,
-            campaign_end TEXT
+            campaign_end TEXT,
+            bot_active INTEGER DEFAULT 1,
+            active_start_hour INTEGER,
+            active_end_hour INTEGER
         )
         """
     )
 
-    # user_stats에 새 컬럼이 없는 경우 추가
+    # 기존 테이블에 새 컬럼 없으면 추가
     ensure_user_stats_columns(cur)
+    ensure_bot_settings_columns(cur)
 
     # 최초 관리자 등록
     for aid in INITIAL_ADMIN_IDS:
         cur.execute("INSERT OR IGNORE INTO admin_users (admin_id) VALUES (?)", (aid,))
 
-    # 기본 키워드(리스트용): ㅋㅋ, ㄱㄱ (단독 처리용, block으로 두지만 로직에서 별도 처리)
+    # 기본 키워드(리스트용)
     cur.execute(
         "INSERT OR IGNORE INTO xp_keywords (word, mode, delta) VALUES (?, 'block', 0)",
         ("ㅋㅋ",),
@@ -291,8 +271,9 @@ def init_db():
     if not row:
         cur.execute(
             """
-            INSERT INTO bot_settings (id, cooldown_seconds, daily_xp_cap, invite_xp)
-            VALUES (1, 7, 500, 100)
+            INSERT INTO bot_settings
+            (id, cooldown_seconds, daily_xp_cap, invite_xp, bot_active)
+            VALUES (1, 7, 500, 100, 1)
             """
         )
 
@@ -305,15 +286,14 @@ def init_db():
 # -----------------------
 # 설정 로딩/변경
 # -----------------------
-
-
 def get_settings():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
         SELECT cooldown_seconds, daily_xp_cap, invite_xp,
-               campaign_start, campaign_end
+               campaign_start, campaign_end,
+               bot_active, active_start_hour, active_end_hour
         FROM bot_settings WHERE id=1
         """
     )
@@ -326,6 +306,9 @@ def get_settings():
             "invite_xp": 100,
             "campaign_start": None,
             "campaign_end": None,
+            "bot_active": 1,
+            "active_start_hour": None,
+            "active_end_hour": None,
         }
     return {
         "cooldown_seconds": row["cooldown_seconds"] or 0,
@@ -333,14 +316,23 @@ def get_settings():
         "invite_xp": row["invite_xp"] or 0,
         "campaign_start": row["campaign_start"],
         "campaign_end": row["campaign_end"],
+        "bot_active": row["bot_active"] if row["bot_active"] is not None else 1,
+        "active_start_hour": row["active_start_hour"],
+        "active_end_hour": row["active_end_hour"],
     }
 
 
 def update_settings(**kwargs):
-    """
-    예: update_settings(cooldown_seconds=10, daily_xp_cap=1000)
-    """
-    allowed = {"cooldown_seconds", "daily_xp_cap", "invite_xp", "campaign_start", "campaign_end"}
+    allowed = {
+        "cooldown_seconds",
+        "daily_xp_cap",
+        "invite_xp",
+        "campaign_start",
+        "campaign_end",
+        "bot_active",
+        "active_start_hour",
+        "active_end_hour",
+    }
     fields = []
     values = []
     for k, v in kwargs.items():
@@ -359,13 +351,43 @@ def update_settings(**kwargs):
     conn.close()
 
 
+def is_bot_running_now(settings=None) -> bool:
+    """
+    - bot_active == 1 이어야 하고
+    - active_start_hour / active_end_hour 둘 다 설정되면 그 시간대(KST)만 True
+    """
+    if settings is None:
+        settings = get_settings()
+
+    if settings.get("bot_active", 1) == 0:
+        return False
+
+    start_h = settings.get("active_start_hour")
+    end_h = settings.get("active_end_hour")
+
+    # 운영 시간 제한이 없으면 항상 True
+    if start_h is None or end_h is None:
+        return True
+
+    now_kst = datetime.utcnow() + timedelta(hours=9)
+    h = now_kst.hour
+
+    if start_h == end_h:
+        # 시작=종료면 항상 off 로 취급
+        return False
+
+    if start_h < end_h:
+        # 예: 9~18
+        return start_h <= h < end_h
+    else:
+        # 예: 22~3 (자정을 넘는 구간)
+        return h >= start_h or h < end_h
+
+
 # -----------------------
 # XP / 레벨 계산 & 로그
 # -----------------------
-
-
 def calc_level(xp: int) -> int:
-    # xp가 커질수록 레벨업이 점점 어려워지도록
     return int(sqrt(xp / 100)) + 1 if xp > 0 else 1
 
 
@@ -375,7 +397,6 @@ def xp_for_next_level(level: int) -> int:
 
 
 def log_xp(chat_id: int, user_id: int, xp_delta: int, msg_len: int = 0):
-    """xp_log에 기록 (캠페인/월별 통계를 위해 모든 XP 소스 기록)"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -396,7 +417,7 @@ def log_xp(chat_id: int, user_id: int, xp_delta: int, msg_len: int = 0):
 
 
 def add_xp(chat_id: int, user, base_xp: int):
-    """XP 추가 후 (xp, level, messages_count) 반환"""
+    """일반 자동 XP 증가용 (메시지, 초대 등)"""
     user_id = user.id
     username = user.username
     first_name = user.first_name or ""
@@ -459,8 +480,77 @@ def add_xp(chat_id: int, user, base_xp: int):
     return xp, level, messages_count
 
 
+def apply_manual_xp_delta(chat_id: int, user, delta: int):
+    """
+    수동 XP 증감용 (messages_count 는 건드리지 않음)
+    delta > 0: 추가, delta < 0: 차감
+    """
+    user_id = user.id
+    username = user.username
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT xp, level, messages_count FROM user_stats WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    )
+    row = cur.fetchone()
+
+    if not row:
+        xp_before = 0
+        xp = max(0, delta)
+        level = calc_level(xp)
+        messages_count = 0
+        cur.execute(
+            """
+            INSERT INTO user_stats
+            (chat_id, user_id, username, first_name, last_name, xp, level, messages_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                user_id,
+                username,
+                first_name,
+                last_name,
+                xp,
+                level,
+                messages_count,
+            ),
+        )
+    else:
+        xp_before = row["xp"]
+        xp = xp_before + delta
+        if xp < 0:
+            xp = 0
+        level = calc_level(xp)
+        messages_count = row["messages_count"]
+        cur.execute(
+            """
+            UPDATE user_stats
+            SET username=?, first_name=?, last_name=?, xp=?, level=?, messages_count=?
+            WHERE chat_id=? AND user_id=?
+            """,
+            (
+                username,
+                first_name,
+                last_name,
+                xp,
+                level,
+                messages_count,
+                chat_id,
+                user_id,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+    return xp, level
+
+
 def get_xp_keywords():
-    """xp_keywords 전체 조회"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT word, mode, delta FROM xp_keywords")
@@ -470,10 +560,8 @@ def get_xp_keywords():
 
 
 # -----------------------
-# 초대수 계산 (invite_links 기준)
+# 초대수 계산
 # -----------------------
-
-
 def get_invite_count_for_user(user_id: int) -> int:
     conn = get_conn()
     cur = conn.cursor()
@@ -503,17 +591,13 @@ def get_invite_count_for_user(user_id: int) -> int:
 # -----------------------
 # 일반 메시지 → XP
 # -----------------------
-
-
 def _is_emoji_only(text: str) -> bool:
-    """대충 이모지/기호만 있는지 검사 (한글/영문/숫자 없으면 이모지로 간주)"""
     stripped = "".join(ch for ch in text if not ch.isspace())
     if not stripped:
         return False
     for ch in stripped:
         if ch.isalnum():
             return False
-        # 한글
         if "가" <= ch <= "힣":
             return False
     return True
@@ -533,47 +617,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = text.strip()
     no_space = "".join(ch for ch in raw if not ch.isspace())
 
-    # 0) 특수 케이스: ㅋㅋㅋ / ㄱㄱ가 "단독"일 때 (공백 제거 후 전부 ㅋ 또는 전부 ㄱ)
+    # 특수 케이스: ㅋㅋ / ㄱㄱ 단독
     only_kek = bool(no_space) and all(ch == "ㅋ" for ch in no_space)
     only_gg = bool(no_space) and all(ch == "ㄱ" for ch in no_space)
     only_kek_or_gg = only_kek or only_gg
 
-    # 기본 XP (메시지 길이 기반)
+    # 기본 XP
     base_xp = 3 + len(no_space) // 20
 
-    # 1) 아주 짧은 메시지 → XP 0
+    # 아주 짧으면 0
     if len(no_space) < 5:
         base_xp = 0
 
-    # 2) 이모지만 있는 메시지 → XP 0
+    # 이모지만 있으면 0
     if _is_emoji_only(text):
         base_xp = 0
 
-    # 3) 단독 ㅋㅋ / 단독 ㄱㄱ → XP 0 (길이에 상관없이)
+    # 단독 ㅋㅋ / ㄱㄱ → 0
     if only_kek_or_gg:
         base_xp = 0
 
-    # 4) 키워드 기반 보너스/차단
+    # 키워드 보너스/차단
     keywords = get_xp_keywords()
     lower_text = text.lower()
     blocked = False
     bonus_total = 0
 
-    # 단독 ㅋㅋ / ㄱㄱ 는 위에서 이미 처리했으므로
-    # 키워드 블록/보너스 로직에서는 더 이상 영향을 주지 않도록 한다.
     if not only_kek_or_gg:
         for row in keywords:
             word = row["word"]
             mode = row["mode"]
             delta = row["delta"] or 0
-
             if not word:
                 continue
-
-            # ㅋㅋ / ㄱㄱ 는 여기서는 스킵 (단독일 때만 처리)
             if word in ("ㅋㅋ", "ㄱㄱ"):
                 continue
-
             if word.lower() in lower_text:
                 if mode == "block":
                     blocked = True
@@ -588,10 +666,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if xp_delta < 0:
         xp_delta = 0
 
-    # -----------------------
-    # XP 안티 스팸 적용 (쿨다운 + 일일 상한)
-    # -----------------------
+    # XP 안티 스팸 + 봇 on/off + 운영 시간
     settings = get_settings()
+
+    # 봇이 꺼져 있거나 운영 시간이 아니면, 관리자 외에는 XP 처리 중단
+    if not is_bot_running_now(settings) and not is_admin(user.id):
+        return
+
     cooldown_sec = settings["cooldown_seconds"]
     daily_cap = settings["daily_xp_cap"]
 
@@ -624,16 +705,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         daily_xp_current = row["daily_xp"] or 0
         daily_date = row["daily_xp_date"]
 
-    # 날짜가 바뀌면 오늘 일일 XP 0으로 리셋
+    # 날짜가 바뀌면 리셋
     if daily_date != today_kst_str:
         daily_xp_current = 0
 
-    # 쿨다운 적용
+    # 쿨다운
     if xp_delta > 0 and cooldown_sec > 0 and last_xp_at is not None:
         if (now_utc - last_xp_at).total_seconds() < cooldown_sec:
             xp_delta = 0
 
-    # 일일 상한 적용
+    # 일일 상한
     if xp_delta > 0 and daily_cap > 0:
         if daily_xp_current >= daily_cap:
             xp_delta = 0
@@ -644,10 +725,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.close()
 
-    # XP 반영 + messages_count 증가
+    # XP 반영
     xp, level, _ = add_xp(chat.id, user, xp_delta)
 
-    # 안티스팸 관련 필드 업데이트 (XP가 실제로 부여된 경우만)
+    # 안티스팸 필드 업데이트
     if xp_delta > 0:
         conn = get_conn()
         cur = conn.cursor()
@@ -669,7 +750,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-    # XP 로그 기록 (메시지 수/기간 통계용, xp_delta가 0이어도 기록)
+    # XP 로그 기록
     try:
         log_xp(chat.id, user.id, xp_delta, msg_len=len(no_space))
     except Exception:
@@ -685,10 +766,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# /start — 단일 도움말 명령어
+# /start — 도움말
 # -----------------------
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     chat = update.effective_chat
@@ -708,11 +787,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/myinvites - 내 초대 인원\n"
         "/invites_ranking - 초대 랭킹\n"
         "/join - 진행 중인 추첨 참가\n"
+        "/event_rank - 캠페인 기간 XP 랭킹\n"
     )
 
     text = base_text
 
-    # 그룹에서는 관리자도 유저와 동일하게 일반 명령어만 표시
     if is_private_chat(chat):
         if is_admin(user.id):
             text += (
@@ -733,7 +812,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/set_inv_xp <XP> - 초대 1명당 XP 설정\n"
                 "/set_campaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
                 "/clear_campaign - 캠페인 기간 초기화\n"
+                "/set_time <시작> <종료> - 봇 운영 시간 설정(KST)\n"
+                "/bot_off - 봇 동작 일시 중지\n"
+                "/bot_on - 봇 동작 재개\n"
+                "/bot_status - 봇 상태 확인\n"
                 "/add_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 수동 지급\n"
+                "/sub_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 차감\n"
                 "/lottery [분] [당첨자수] - 그룹에서 추첨 시작\n"
                 "/lottery_end <인원수> - 추첨 종료 및 당첨자 추첨\n"
             )
@@ -752,10 +836,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # 월별 / 캠페인 XP 계산 헬퍼
 # -----------------------
-
-
 def _get_month_range_kst(target_date: date):
-    """해당 날짜가 속한 월의 KST 기준 시작/끝(UTC ISO)"""
     start_kst = datetime(target_date.year, target_date.month, 1)
     if target_date.month == 12:
         next_kst = datetime(target_date.year + 1, 1, 1)
@@ -786,13 +867,34 @@ def _sum_xp_in_range(chat_id: int, user_id: int, start_iso: str, end_iso: str) -
 # -----------------------
 # 공용 / 유저 명령어
 # -----------------------
+async def _resolve_target_user_id(arg: str):
+    q = arg.strip()
+    if q.startswith("@"):
+        q = q[1:]
+
+    if q.isdigit():
+        return int(q)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    if MAIN_CHAT_ID != 0:
+        cur.execute(
+            "SELECT user_id FROM user_stats WHERE chat_id=? AND username=? LIMIT 1",
+            (MAIN_CHAT_ID, q),
+        )
+    else:
+        cur.execute(
+            "SELECT user_id FROM user_stats WHERE username=? LIMIT 1",
+            (q,),
+        )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return int(row["user_id"])
 
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /chat_id <@handle 또는 user_id>
-    → 해당 유저의 user_id 를 찾아서 보여줌
-    """
     chat = update.effective_chat
     user = update.effective_user
     msg = update.message
@@ -815,18 +917,10 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /stats:
-    - 총 XP, 레벨, 메시지 수
-    - 이번 달 XP, 지난 달 XP
-    - 캠페인 XP (설정된 경우)
-    초대 인원(invites_count)는 표기하지 않음 (/myinvites에서만 확인)
-    """
     chat = update.effective_chat
     user = update.effective_user
     msg = update.message
 
-    # 통계는 MAIN_CHAT_ID 기준으로 보는게 직관적이라, DM에서도 MAIN_CHAT_ID 기준 사용
     chat_id = MAIN_CHAT_ID or chat.id
 
     conn = get_conn()
@@ -851,7 +945,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_kst = datetime.utcnow() + timedelta(hours=9)
     today = now_kst.date()
 
-    # 이번 달 / 지난 달 XP (xp_log 기반)
     # 이번 달
     cur_month_start_iso, cur_month_end_iso = _get_month_range_kst(today)
     cur_month_xp = _sum_xp_in_range(chat_id, user.id, cur_month_start_iso, cur_month_end_iso)
@@ -940,13 +1033,17 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /daily:
-    - 24시간이 아니라, "KST 자정 기준 1일 1회"로 변경
-    - last_daily를 YYYY-MM-DD(KST) 문자열로 저장
+    /daily: KST 자정 기준 1일 1회
     """
     chat = update.effective_chat
     user = update.effective_user
     msg = update.message
+
+    # 봇 on/off + 운영 시간 체크 (관리자는 항상 가능)
+    settings = get_settings()
+    if not is_bot_running_now(settings) and not is_admin(user.id):
+        await msg.reply_text("현재 봇이 일시 중지 상태이거나 운영 시간이 아닙니다. 나중에 다시 시도해 주세요.")
+        return
 
     chat_id = MAIN_CHAT_ID or chat.id
 
@@ -987,7 +1084,6 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        # 로그 기록
         log_xp(chat_id, user.id, bonus, msg_len=0)
 
         await msg.reply_text(f"🎁 일일 보상으로 {bonus} XP를 받았습니다!")
@@ -996,9 +1092,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last = row["last_daily"]
     already_today = False
     if last:
-        # 예전 데이터가 ISO일 수도 있고, 이미 YYYY-MM-DD일 수도 있음
         if len(last) == 10:
-            # YYYY-MM-DD
             already_today = (last == today_str)
         else:
             try:
@@ -1021,7 +1115,6 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    # 로그 기록
     log_xp(chat_id, user.id, bonus, msg_len=0)
 
     await msg.reply_text(f"🎁 일일 보상으로 {bonus} XP를 받았습니다!\n현재 XP: {xp}, 레벨: {level}")
@@ -1030,8 +1123,6 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # /mylink & 초대 관련
 # -----------------------
-
-
 async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -1048,7 +1139,6 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     cur = conn.cursor()
 
-    # 이미 발급한 초대링크가 있는지 확인
     cur.execute(
         "SELECT invite_link FROM invite_links WHERE chat_id=? AND inviter_id=? LIMIT 1",
         (chat.id, user.id),
@@ -1064,7 +1154,6 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    # 새 초대 링크 생성
     try:
         invite: ChatInviteLink = await bot.create_chat_invite_link(
             chat_id=chat.id,
@@ -1094,11 +1183,6 @@ async def cmd_mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_myinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /myinvites:
-    - 그룹/DM 모두 사용 가능
-    - MAIN_CHAT_ID 기준으로 초대 인원 집계
-    """
     user = update.effective_user
     msg = update.message
     count = get_invite_count_for_user(user.id)
@@ -1107,10 +1191,6 @@ async def cmd_myinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /invites_ranking:
-    - 초대 랭킹 TOP 10 (메인 그룹 기준)
-    """
     chat = update.effective_chat
 
     if not is_main_chat(chat.id):
@@ -1150,10 +1230,8 @@ async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # -----------------------
-# 초대 tracking (멤버 입장 감지) + 초대 XP
+# 초대 tracking
 # -----------------------
-
-
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or not is_main_chat(chat.id):
@@ -1217,16 +1295,14 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conn.commit()
         conn.close()
 
-        # 초대 XP 부여
+        # 초대 XP 부여 (봇이 켜져 있고 운영 시간일 때만)
         settings = get_settings()
         invite_xp = settings["invite_xp"]
-        if invite_xp > 0:
+        if invite_xp > 0 and is_bot_running_now(settings):
             try:
                 inviter_member = await context.bot.get_chat_member(chat.id, inviter)
                 inviter_user = inviter_member.user
-                # XP 부여
                 xp, level, _ = add_xp(chat.id, inviter_user, invite_xp)
-                # 로그 기록
                 log_xp(chat.id, inviter_user.id, invite_xp, msg_len=0)
             except Exception:
                 logger.exception("초대 XP 부여 실패")
@@ -1240,37 +1316,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # -----------------------
 # 관리자 / OWNER 관련 유틸 & 명령어
 # -----------------------
-
-
-async def _resolve_target_user_id(arg: str):
-    """@username 또는 숫자 user_id 문자열을 받아 user_id 반환 (없으면 None)"""
-    q = arg.strip()
-    if q.startswith("@"):
-        q = q[1:]
-
-    if q.isdigit():
-        return int(q)
-
-    # username 으로 user_stats 에서 찾기 (MAIN_CHAT_ID 우선)
-    conn = get_conn()
-    cur = conn.cursor()
-    if MAIN_CHAT_ID != 0:
-        cur.execute(
-            "SELECT user_id FROM user_stats WHERE chat_id=? AND username=? LIMIT 1",
-            (MAIN_CHAT_ID, q),
-        )
-    else:
-        cur.execute(
-            "SELECT user_id FROM user_stats WHERE username=? LIMIT 1",
-            (q,),
-        )
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return int(row["user_id"])
-
-
 async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
@@ -1386,7 +1431,6 @@ async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """관리자용: /user_stats <@handle 또는 user_id> → 유저 스탯 조회 (총/월/캠페인)"""
     admin = update.effective_user
     msg = update.message
     args = context.args
@@ -1454,7 +1498,6 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_kst = datetime.utcnow() + timedelta(hours=9)
     today = now_kst.date()
 
-    # 이번 달 / 지난 달 XP
     cur_month_start_iso, cur_month_end_iso = _get_month_range_kst(today)
     cur_month_xp = _sum_xp_in_range(chat_id, target_id, cur_month_start_iso, cur_month_end_iso)
 
@@ -1465,7 +1508,6 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prev_month_start_iso, prev_month_end_iso = _get_month_range_kst(prev_date)
     prev_month_xp = _sum_xp_in_range(chat_id, target_id, prev_month_start_iso, prev_month_end_iso)
 
-    # 캠페인 XP
     settings = get_settings()
     campaign_xp = None
     if settings["campaign_start"] and settings["campaign_end"]:
@@ -1504,13 +1546,7 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # /reset_xp total (백업 + 2단계 확인)
 # -----------------------
-
-
 def backup_db_to_zip() -> str:
-    """
-    xp_bot.db 를 zip으로 압축해서 파일 경로 반환.
-    같은 폴더에 timestamp 붙여서 생성.
-    """
     base_dir = os.path.dirname(DB_PATH) or "."
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     zip_name = f"xp_bot_backup_{ts}.zip"
@@ -1524,12 +1560,6 @@ def backup_db_to_zip() -> str:
 
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /reset_xp total
-    OWNER 전용.
-    - 1단계: '/reset_xp total' → 전체 DB 백업 zip 생성 후, 2단계 안내
-    - 2단계: '/reset_xp total 동의합니다.' → 실제 리셋 수행
-    """
     user = update.effective_user
     msg = update.message
     args = context.args
@@ -1558,13 +1588,11 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     confirmation_text = "동의합니다."
 
-    # 2단계 확인: /reset_xp total 동의합니다.
+    # 2단계
     if len(args) >= 2 and " ".join(args[1:]) == confirmation_text:
-        # 실제 리셋 수행
         conn = get_conn()
         cur = conn.cursor()
 
-        # 리셋 전 스냅샷 생성
         cur.execute(
             """
             SELECT username, first_name, last_name, xp, level
@@ -1583,7 +1611,6 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         total_users = cur.fetchone()["c"]
 
-        # 실제 리셋 수행
         cur.execute(
             """
             UPDATE user_stats
@@ -1598,7 +1625,6 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        # 스냅샷 텍스트 구성
         if not rows:
             snapshot_body = "초기화 직전 기록된 데이터가 없습니다."
         else:
@@ -1614,7 +1640,6 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"\n총 기록된 유저 수: {total_users}명")
             snapshot_body = "\n".join(lines)
 
-        # OWNER DM 으로 스냅샷 전송
         try:
             await msg.bot.send_message(chat_id=user.id, text=snapshot_body)
         except Exception:
@@ -1627,8 +1652,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 여기까지 오면 '/reset_xp total' (백업 + 2단계 안내)
-    # 1단계: 전체 DB 백업 zip 생성 후 OWNER에게 전송
+    # 1단계: 백업
     try:
         zip_path = backup_db_to_zip()
         await msg.bot.send_document(
@@ -1649,10 +1673,8 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# XP 키워드 관리 (DM, 관리자 전용)
+# XP 키워드 관리
 # -----------------------
-
-
 async def cmd_addxpbonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
@@ -1804,10 +1826,8 @@ async def cmd_listxpwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# 안티 스팸/초대/캠페인 설정 명령어
+# 안티 스팸/초대/캠페인/운영 시간 설정
 # -----------------------
-
-
 async def cmd_setcooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
@@ -1819,7 +1839,6 @@ async def cmd_setcooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not is_private_chat(chat):
         await msg.reply_text("이 명령어는 DM에서 사용하는 것을 권장합니다.")
-        # 계속 진행은 허용
 
     if not args:
         await msg.reply_text("사용법: /set_cooldown <초>  (예: /set_cooldown 7)")
@@ -1944,10 +1963,112 @@ async def cmd_clearcampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("✅ 캠페인 기간 설정이 초기화되었습니다.")
 
 
+async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_time <start_hour> <end_hour> (KST)
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+    args = context.args
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용 가능합니다.")
+        return
+    if not is_private_chat(chat):
+        await msg.reply_text("이 명령어는 DM에서 사용하는 것을 권장합니다.")
+
+    if len(args) != 2:
+        await msg.reply_text("사용법: /set_time <시작시각> <종료시각>  (예: /set_time 9 23)")
+        return
+
+    try:
+        start_h = int(args[0])
+        end_h = int(args[1])
+    except ValueError:
+        await msg.reply_text("시각은 0~23 사이의 정수여야 합니다.")
+        return
+
+    if not (0 <= start_h <= 23 and 0 <= end_h <= 23):
+        await msg.reply_text("시각은 0~23 사이의 값만 사용할 수 있습니다.")
+        return
+
+    update_settings(active_start_hour=start_h, active_end_hour=end_h)
+
+    if start_h == end_h:
+        await msg.reply_text(
+            "⚠️ 시작시각과 종료시각이 같으므로, 운영 시간이 없는 상태로 설정되었습니다.\n"
+            "다시 설정해 주세요."
+        )
+        return
+
+    await msg.reply_text(
+        f"✅ 봇 운영 시간이 매일 KST 기준 {start_h:02d}:00 ~ {end_h:02d}:00 으로 설정되었습니다.\n"
+        "이 시간 외에는 일반 유저의 XP 적립 및 일부 기능이 동작하지 않습니다.\n"
+        "관리자 명령어는 항상 사용 가능합니다."
+    )
+
+
+async def cmd_bot_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    update_settings(bot_active=0)
+    await msg.reply_text("🛑 봇 동작이 일시 중지되었습니다.\n관리자 명령어는 계속 사용할 수 있습니다.")
+
+
+async def cmd_bot_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    update_settings(bot_active=1)
+    await msg.reply_text("✅ 봇 동작이 다시 활성화되었습니다.")
+
+
+async def cmd_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+
+    settings = get_settings()
+    active_flag = settings.get("bot_active", 1)
+    start_h = settings.get("active_start_hour")
+    end_h = settings.get("active_end_hour")
+    now_kst = datetime.utcnow() + timedelta(hours=9)
+
+    is_running = is_bot_running_now(settings)
+
+    if start_h is None or end_h is None:
+        time_info = "운영 시간 제한 없음"
+    else:
+        time_info = f"KST {start_h:02d}:00 ~ {end_h:02d}:00"
+
+    status = "동작 중 ✅" if active_flag == 1 else "일시 중지 🛑"
+    now_state = "현재 시점에는 기능 사용 가능" if is_running else "현재 시점에는 일반 기능 정지"
+
+    text = (
+        "🤖 봇 상태\n\n"
+        f"- 기본 상태: {status}\n"
+        f"- 운영 시간: {time_info}\n"
+        f"- 현재 시각(KST): {now_kst.strftime('%Y-%m-%d %H:%M')}\n"
+        f"- 설명: {now_state}\n\n"
+        "※ 관리자 명령어는 항상 사용 가능합니다."
+    )
+    await msg.reply_text(text)
+
+
+# -----------------------
+# 수동 XP 지급/차감
+# -----------------------
 async def cmd_add_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /add_xp <@handle 또는 user_id> <XP>
-    관리자용 수동 XP 지급
     """
     admin = update.effective_user
     chat = update.effective_chat
@@ -1979,7 +2100,6 @@ async def cmd_add_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = MAIN_CHAT_ID or chat.id
 
-    # 해당 유저의 이름 정보는 user_stats에서 가져오거나, 없으면 placeholder
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2008,10 +2128,9 @@ async def cmd_add_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row["last_name"] or "",
         )
     else:
-        # 기록이 전혀 없다면 이름 정보 없이 추가
         u = SimpleUser(target_id, None, "", "")
 
-    xp, level, _ = add_xp(chat_id, u, delta)
+    xp, level = apply_manual_xp_delta(chat_id, u, delta)
     log_xp(chat_id, target_id, delta, msg_len=0)
 
     await msg.reply_text(
@@ -2020,19 +2139,86 @@ async def cmd_add_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_sub_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /sub_xp <@handle 또는 user_id> <XP>
+    """
+    admin = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+    args = context.args
+
+    if not is_admin(admin.id):
+        await msg.reply_text("관리자만 사용 가능합니다.")
+        return
+
+    if not args or len(args) < 2:
+        await msg.reply_text("사용법: /sub_xp <@handle 또는 user_id> <XP>")
+        return
+
+    target_id = await _resolve_target_user_id(args[0])
+    if target_id is None:
+        await msg.reply_text("해당 유저를 찾을 수 없습니다.")
+        return
+
+    try:
+        delta = int(args[1])
+    except ValueError:
+        await msg.reply_text("XP 값은 정수여야 합니다.")
+        return
+
+    if delta <= 0:
+        await msg.reply_text("XP 값은 1 이상이어야 합니다.")
+        return
+
+    chat_id = MAIN_CHAT_ID or chat.id
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT username, first_name, last_name
+        FROM user_stats
+        WHERE chat_id=? AND user_id=?
+        """,
+        (chat_id, target_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    class SimpleUser:
+        def __init__(self, uid, username, first_name, last_name):
+            self.id = uid
+            self.username = username
+            self.first_name = first_name
+            self.last_name = last_name
+
+    if row:
+        u = SimpleUser(
+            target_id,
+            row["username"],
+            row["first_name"] or "",
+            row["last_name"] or "",
+        )
+    else:
+        u = SimpleUser(target_id, None, "", "")
+
+    xp, level = apply_manual_xp_delta(chat_id, u, -delta)
+    log_xp(chat_id, target_id, -delta, msg_len=0)
+
+    await msg.reply_text(
+        f"✅ user_id {target_id} 에게서 {delta} XP를 차감했습니다.\n"
+        f"현재 총 XP: {xp}, 레벨: {level}"
+    )
+
+
 # -----------------------
 # 기간별 요약 (/today, /week, /range)
 # -----------------------
-
-
 def _build_range_summary(start_date_kst: date, end_date_kst: date) -> str:
-    """
-    KST 기준 start~end 날짜(둘 다 포함)에 대한 메인 그룹 요약 텍스트 생성
-    """
     if MAIN_CHAT_ID == 0:
         return "MAIN_CHAT_ID가 설정되어 있지 않아 요약을 생성할 수 없습니다."
 
-    # KST 날짜범위를 UTC ISO 문자열로 변환
     start_kst = datetime.combine(start_date_kst, time(0, 0))
     end_kst = datetime.combine(end_date_kst + timedelta(days=1), time(0, 0))
 
@@ -2045,7 +2231,6 @@ def _build_range_summary(start_date_kst: date, end_date_kst: date) -> str:
     conn = get_conn()
     cur = conn.cursor()
 
-    # 총 메시지 수 / 활동 유저 수
     cur.execute(
         """
         SELECT COUNT(*) AS msg_count,
@@ -2059,7 +2244,6 @@ def _build_range_summary(start_date_kst: date, end_date_kst: date) -> str:
     msg_count = base_row["msg_count"] or 0
     user_count = base_row["user_count"] or 0
 
-    # 신규 유저 수 (이 기간에 처음으로 등장한 유저)
     cur.execute(
         """
         SELECT COUNT(*) AS new_users
@@ -2076,7 +2260,6 @@ def _build_range_summary(start_date_kst: date, end_date_kst: date) -> str:
     new_row = cur.fetchone()
     new_users = new_row["new_users"] or 0
 
-    # XP 기준 TOP 10
     cur.execute(
         """
         SELECT l.user_id,
@@ -2157,7 +2340,7 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now_kst = datetime.utcnow() + timedelta(hours=9)
     end_date = now_kst.date()
-    start_date = end_date - timedelta(days=6)  # 최근 7일 (오늘 포함)
+    start_date = end_date - timedelta(days=6)
 
     text = _build_range_summary(start_date, end_date)
     await msg.reply_text(text)
@@ -2196,10 +2379,8 @@ async def cmd_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# Daily summary (23:59 KST)
+# Daily summary & backup
 # -----------------------
-
-
 async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     if MAIN_CHAT_ID == 0:
         return
@@ -2255,16 +2436,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
             logger.exception("daily summary DM 실패 (user_id=%s)", uid)
 
 
-# -----------------------
-# 자동 백업 (매일 23:59 KST)
-# -----------------------
-
-
 async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
-    """
-    매일 23:59 KST 기준 xp_bot.db 를 zip으로 압축하여
-    OWNER + 관리자에게 DM으로 전송
-    """
     try:
         zip_path = backup_db_to_zip()
     except Exception:
@@ -2285,29 +2457,20 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # 로터리(추첨) 기능
 # -----------------------
-
-
 async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /lottery
     /lottery <분>
     /lottery <분> <당첨자수>
-
-    - 그룹 관리자 + DB 관리자 + OWNER만 사용
-    - /lottery           : 시간 제한 없이 추첨 시작 → /lottery_end <인원수> 로 종료
-    - /lottery 60        : 60분 동안만 /join 받기, 이후 자동으로 종료(당첨자 뽑지는 않음)
-    - /lottery 60 3      : 60분 후 자동으로 3명 추첨 및 종료
     """
     user = update.effective_user
     chat = update.effective_chat
     msg = update.message
     args = context.args
 
-    # DB 관리자 목록 최신화
     reload_admins()
 
-    # ✅ 그룹 관리자 or DB 관리자 or OWNER 판정
-    if not await is_chat_admin_or_bot_admin(update, context):
+    if not is_admin(user.id):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
 
@@ -2386,7 +2549,6 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_join_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /join
-    - 유저가 현재 진행 중인 추첨에 참가
     """
     chat = update.effective_chat
     user = update.effective_user
@@ -2413,21 +2575,13 @@ async def cmd_join_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /lottery_end <당첨자수>
-
-    - 그룹 관리자 + DB 관리자 + OWNER만 사용
-    - /lottery 또는 /lottery 60 으로 시작한 경우: 이 명령어로 종료 + 추첨
-    - /lottery 60 3 으로 시작했더라도, 시간이 되기 전에 수동으로 종료하고 싶으면 이 명령어 사용 가능
     """
     user = update.effective_user
     chat = update.effective_chat
     msg = update.message
     args = context.args
 
-    # DB 관리자 목록 최신화
-    reload_admins()
-
-    # ✅ 그룹 관리자 or DB 관리자 or OWNER 판정
-    if not await is_chat_admin_or_bot_admin(update, context):
+    if not is_admin(user.id):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
 
@@ -2460,7 +2614,6 @@ async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LOTTERY_STATE.pop(chat.id, None)
         return
 
-    # 예약된 자동 종료 job 이 있으면 취소
     job = state.get("job")
     if job is not None:
         try:
@@ -2496,11 +2649,6 @@ async def cmd_lottery_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
-    """
-    run_once 로 호출되는 자동 종료 콜백
-    - winners 가 None 이면: 추첨만 종료하고, 관리자가 /lottery_end 로 수동 추첨
-    - winners 가 있으면: 자동으로 winners 명 추첨 후 종료
-    """
     job = context.job
     data = job.data or {}
     chat_id = data.get("chat_id")
@@ -2515,7 +2663,6 @@ async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
 
     participants = list(state.get("participants", set()))
 
-    # 더 이상 active 아님
     state["active"] = False
     state["job"] = None
 
@@ -2527,7 +2674,6 @@ async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
         LOTTERY_STATE.pop(chat_id, None)
         return
 
-    # winners 가 설정되지 않은 경우: 추첨은 종료하지만, 실제 당첨자는 /lottery_end 에서 뽑도록
     if winners is None:
         await context.bot.send_message(
             chat_id=chat_id,
@@ -2537,10 +2683,8 @@ async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
                 "예: /lottery_end 3"
             ),
         )
-        # 참가자 목록은 유지해서 나중에 /lottery_end 에서 사용
         return
 
-    # winners 가 지정된 경우: 자동으로 추첨까지 진행
     num = min(len(participants), winners)
     chosen_ids = random.sample(participants, num)
 
@@ -2569,10 +2713,81 @@ async def auto_end_lottery(context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
+# /event_rank – 캠페인 기간 XP 랭킹
+# -----------------------
+async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /event_rank
+    - 관리자 설정 캠페인 기간(campaign_start ~ campaign_end) 동안의 XP 랭킹
+    """
+    chat = update.effective_chat
+    msg = update.message
+    chat_id = MAIN_CHAT_ID or chat.id
+
+    settings = get_settings()
+    cs = settings["campaign_start"]
+    ce = settings["campaign_end"]
+
+    if not cs or not ce:
+        await msg.reply_text("현재 설정된 캠페인 기간이 없습니다. (관리자가 /set_campaign 으로 먼저 설정해야 합니다.)")
+        return
+
+    try:
+        cs_date = date.fromisoformat(cs)
+        ce_date = date.fromisoformat(ce)
+    except Exception:
+        await msg.reply_text("캠페인 기간 설정값이 잘못되어 있습니다. 관리자에게 문의해 주세요.")
+        return
+
+    cs_kst = datetime.combine(cs_date, time(0, 0))
+    ce_kst = datetime.combine(ce_date + timedelta(days=1), time(0, 0))
+    cs_utc = cs_kst - timedelta(hours=9)
+    ce_utc = ce_kst - timedelta(hours=9)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT l.user_id,
+               u.username, u.first_name, u.last_name,
+               SUM(l.xp_delta) AS total_xp
+        FROM xp_log l
+        LEFT JOIN user_stats u
+          ON u.chat_id = l.chat_id AND u.user_id = l.user_id
+        WHERE l.chat_id=? AND l.created_at >= ? AND l.created_at < ?
+        GROUP BY l.user_id, u.username, u.first_name, u.last_name
+        HAVING total_xp > 0
+        ORDER BY total_xp DESC
+        LIMIT 20
+        """,
+        (chat_id, cs_utc.isoformat(), ce_utc.isoformat()),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await msg.reply_text("캠페인 기간 동안 XP 기록이 없습니다.")
+        return
+
+    lines = [
+        "🏁 캠페인 XP 랭킹\n",
+        f"기간 (KST): {cs_date.isoformat()} ~ {ce_date.isoformat()}\n",
+    ]
+    for i, row in enumerate(rows, start=1):
+        if row["username"]:
+            name = f"@{row['username']}"
+        else:
+            fn = row["first_name"] or ""
+            ln = row["last_name"] or ""
+            name = (fn + " " + ln).strip() or f"user_id {row['user_id']}"
+        lines.append(f"{i}. {name} - {row['total_xp']} XP")
+
+    await msg.reply_text("\n".join(lines))
+
+
+# -----------------------
 # MAIN
 # -----------------------
-
-
 def main():
     init_db()
 
@@ -2595,6 +2810,7 @@ def main():
     app.add_handler(CommandHandler("mylink", cmd_mylink))
     app.add_handler(CommandHandler("myinvites", cmd_myinvites))
     app.add_handler(CommandHandler("invites_ranking", cmd_invites_ranking))
+    app.add_handler(CommandHandler("event_rank", cmd_event_rank))
 
     # 로터리(추첨)
     app.add_handler(CommandHandler("lottery", cmd_lottery))
@@ -2615,13 +2831,18 @@ def main():
     app.add_handler(CommandHandler("del_xp_word", cmd_delxpword))
     app.add_handler(CommandHandler("list_xp_words", cmd_listxpwords))
 
-    # 안티 스팸/초대/캠페인 설정
+    # 안티 스팸/초대/캠페인/운영 시간 설정
     app.add_handler(CommandHandler("set_cooldown", cmd_setcooldown))
     app.add_handler(CommandHandler("set_daily_cap", cmd_setdailycap))
     app.add_handler(CommandHandler("set_inv_xp", cmd_setinvxp))
     app.add_handler(CommandHandler("set_campaign", cmd_setcampaign))
     app.add_handler(CommandHandler("clear_campaign", cmd_clearcampaign))
+    app.add_handler(CommandHandler("set_time", cmd_settime))
+    app.add_handler(CommandHandler("bot_off", cmd_bot_off))
+    app.add_handler(CommandHandler("bot_on", cmd_bot_on))
+    app.add_handler(CommandHandler("bot_status", cmd_bot_status))
     app.add_handler(CommandHandler("add_xp", cmd_add_xp))
+    app.add_handler(CommandHandler("sub_xp", cmd_sub_xp))
 
     # 기간 요약
     app.add_handler(CommandHandler("today", cmd_today))
