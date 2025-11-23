@@ -1018,7 +1018,7 @@ async def cmd_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, row in enumerate(rows, start=1):
         username = row["username"]
         if username:
-            name = f"@{username}"
+            name = username
         else:
             fn = row["first_name"] or ""
             ln = row["last_name"] or ""
