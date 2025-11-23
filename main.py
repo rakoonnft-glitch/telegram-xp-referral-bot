@@ -2256,7 +2256,6 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
 # 로터리(추첨) 기능
 # -----------------------
 
-
 async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /lottery
@@ -2273,6 +2272,10 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     args = context.args
 
+    # ✅ 항상 최신 관리자 목록 다시 로드 (DB → 메모리)
+    reload_admins()
+
+    # ✅ 관리자 체크
     if not is_admin(user.id):
         await msg.reply_text("관리자만 사용할 수 있습니다.")
         return
@@ -2309,7 +2312,6 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     job = None
-    # duration 이 있으면 run_once 스케줄
     if duration is not None:
         job = context.job_queue.run_once(
             auto_end_lottery,
@@ -2341,7 +2343,6 @@ async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "관리자가 /lottery_end <당첨자수> 로 당첨자를 뽑을 수 있습니다."
         )
     else:
-        # duration, winners 둘 다 있는 경우 (예: /lottery 60 3)
         text = (
             f"⏳ {duration}분 동안 진행되는 추첨을 시작했습니다.\n"
             f"종료 시 자동으로 {winners}명을 추첨합니다.\n"
