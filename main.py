@@ -687,22 +687,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_admin(user.id):
             text += (
                 "\n🔧 관리자 명령어 (DM에서 사용 권장)\n"
-                "/chatid <@handle 또는 user_id> - 해당 유저 ID 조회\n"
-                "/listadmins - 관리자 목록\n"
-                "/refuser <@handle 또는 user_id> - 특정 유저 초대수\n"
-                "/userstats <@handle 또는 user_id> - 특정 유저 스탯\n"
+                "/chat_id <@handle 또는 user_id> - 해당 유저 ID 조회\n"
+                "/list_admins - 관리자 목록\n"
+                "/ref_user <@handle 또는 user_id> - 특정 유저 초대수\n"
+                "/user_stats <@handle 또는 user_id> - 특정 유저 스탯\n"
                 "/today - 오늘 기준 메인 그룹 요약(KST)\n"
                 "/week - 최근 7일 메인 그룹 요약(KST)\n"
                 "/range YYYY-MM-DD YYYY-MM-DD - 기간별 요약(KST)\n"
-                "/addxpbonus <word> <xp> - 키워드 보너스 XP 등록\n"
-                "/addxpblock <word> - 키워드 차단 등록\n"
-                "/delxpword <word> - 키워드 삭제\n"
-                "/listxpwords - 키워드 목록\n"
-                "/setcooldown <초> - XP 쿨다운 설정\n"
-                "/setdailycap <XP> - 일일 XP 상한 설정\n"
-                "/setinvxp <XP> - 초대 1명당 XP 설정\n"
-                "/setcampaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
-                "/clearcampaign - 캠페인 기간 초기화\n"
+                "/add_xp_bonus <word> <xp> - 키워드 보너스 XP 등록\n"
+                "/add_xp_block <word> - 키워드 차단 등록\n"
+                "/del_xp_word <word> - 키워드 삭제\n"
+                "/list_xp_words - 키워드 목록\n"
+                "/set_cooldown <초> - XP 쿨다운 설정\n"
+                "/set_daily_cap <XP> - 일일 XP 상한 설정\n"
+                "/set_inv_xp <XP> - 초대 1명당 XP 설정\n"
+                "/set_campaign <YYYY-MM-DD> <YYYY-MM-DD> - 캠페인 기간 설정\n"
+                "/clear_campaign - 캠페인 기간 초기화\n"
                 "/add_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 수동 지급\n"
                 "/lottery [분] [당첨자수] - 그룹에서 추첨 시작\n"
                 "/lottery_end <인원수> - 추첨 종료 및 당첨자 추첨\n"
@@ -711,9 +711,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_owner(user.id):
             text += (
                 "\n😎 OWNER 전용 명령어 (DM 전용 권장)\n"
-                "/addadmin <user_id 또는 @handle> - 관리자 추가\n"
-                "/deladmin <user_id 또는 @handle> - 관리자 제거\n"
-                "/resetxp total - 메인 그룹 XP 전체 초기화 (2단계 확인, 백업 후 진행)\n"
+                "/add_admin <user_id 또는 @handle> - 관리자 추가\n"
+                "/del_admin <user_id 또는 @handle> - 관리자 제거\n"
+                "/reset_xp total - 메인 그룹 XP 전체 초기화 (2단계 확인, 백업 후 진행)\n"
             )
 
     await message.reply_text(text)
@@ -760,7 +760,7 @@ def _sum_xp_in_range(chat_id: int, user_id: int, start_iso: str, end_iso: str) -
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /chatid <@handle 또는 user_id>
+    /chat_id <@handle 또는 user_id>
     → 해당 유저의 user_id 를 찾아서 보여줌
     """
     chat = update.effective_chat
@@ -773,7 +773,7 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /chatid <@handle 또는 user_id>")
+        await msg.reply_text("사용법: /chat_id <@handle 또는 user_id>")
         return
 
     target_id = await _resolve_target_user_id(args[0])
@@ -1272,7 +1272,7 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /addadmin <user_id 또는 @username>")
+        await msg.reply_text("사용법: /add_admin <user_id 또는 @username>")
         return
 
     target_id = await _resolve_target_user_id(args[0])
@@ -1312,7 +1312,7 @@ async def cmd_deladmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /deladmin <user_id 또는 @username>")
+        await msg.reply_text("사용법: /del_admin <user_id 또는 @username>")
         return
 
     target_id = await _resolve_target_user_id(args[0])
@@ -1343,7 +1343,7 @@ async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("관리자만 사용 가능합니다.")
         return
     if not args:
-        await msg.reply_text("사용법: /refuser @username 또는 /refuser user_id")
+        await msg.reply_text("사용법: /ref_user @username 또는 /ref_user user_id")
         return
 
     target_id = await _resolve_target_user_id(args[0])
@@ -1356,7 +1356,7 @@ async def cmd_refuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """관리자용: /userstats <@handle 또는 user_id> → 유저 스탯 조회 (총/월/캠페인)"""
+    """관리자용: /user_stats <@handle 또는 user_id> → 유저 스탯 조회 (총/월/캠페인)"""
     admin = update.effective_user
     msg = update.message
     args = context.args
@@ -1366,7 +1366,7 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /userstats @username 또는 /userstats user_id")
+        await msg.reply_text("사용법: /user_stats @username 또는 /user_stats user_id")
         return
 
     target_id = await _resolve_target_user_id(args[0])
@@ -1472,7 +1472,7 @@ async def cmd_userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
-# /resetxp total (백업 + 2단계 확인)
+# /reset_xp total (백업 + 2단계 확인)
 # -----------------------
 
 
@@ -1495,10 +1495,10 @@ def backup_db_to_zip() -> str:
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /resetxp total
+    /reset_xp total
     OWNER 전용.
-    - 1단계: '/resetxp total' → 전체 DB 백업 zip 생성 후, 2단계 안내
-    - 2단계: '/resetxp total 동의합니다.' → 실제 리셋 수행
+    - 1단계: '/reset_xp total' → 전체 DB 백업 zip 생성 후, 2단계 안내
+    - 2단계: '/reset_xp total 동의합니다.' → 실제 리셋 수행
     """
     user = update.effective_user
     msg = update.message
@@ -1515,20 +1515,20 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await msg.reply_text(
             "사용법:\n"
-            "/resetxp total          → 리셋 전 전체 백업 생성 + 2단계 안내\n"
-            "/resetxp total 동의합니다. → 실제 XP 전체 초기화 실행"
+            "/reset_xp total          → 리셋 전 전체 백업 생성 + 2단계 안내\n"
+            "/reset_xp total 동의합니다. → 실제 XP 전체 초기화 실행"
         )
         return
 
     mode = args[0]
 
     if mode != "total":
-        await msg.reply_text("지원되지 않는 모드입니다. 현재는 '/resetxp total'만 지원합니다.")
+        await msg.reply_text("지원되지 않는 모드입니다. 현재는 '/reset_xp total'만 지원합니다.")
         return
 
     confirmation_text = "동의합니다."
 
-    # 2단계 확인: /resetxp total 동의합니다.
+    # 2단계 확인: /reset_xp total 동의합니다.
     if len(args) >= 2 and " ".join(args[1:]) == confirmation_text:
         # 실제 리셋 수행
         conn = get_conn()
@@ -1597,7 +1597,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 여기까지 오면 '/resetxp total' (백업 + 2단계 안내)
+    # 여기까지 오면 '/reset_xp total' (백업 + 2단계 안내)
     # 1단계: 전체 DB 백업 zip 생성 후 OWNER에게 전송
     try:
         zip_path = backup_db_to_zip()
@@ -1613,7 +1613,7 @@ async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ 이제 XP 전체 초기화를 진행할 수 있습니다.\n\n"
         "정말로 메인 그룹의 XP/레벨/메시지/초대 기록을 모두 초기화하시겠습니까?\n"
         "초기화를 진행하려면 아래와 같이 다시 입력해 주세요.\n\n"
-        f"`/resetxp total {confirmation_text}`",
+        f"`/reset_xp total {confirmation_text}`",
         parse_mode="Markdown",
     )
 
@@ -1637,7 +1637,7 @@ async def cmd_addxpbonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(args) < 2:
-        await msg.reply_text("사용법: /addxpbonus <word> <xp>")
+        await msg.reply_text("사용법: /add_xp_bonus <word> <xp>")
         return
 
     word = args[0].strip()
@@ -1677,7 +1677,7 @@ async def cmd_addxpblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /addxpblock <word>")
+        await msg.reply_text("사용법: /add_xp_block <word>")
         return
 
     word = args[0].strip()
@@ -1712,7 +1712,7 @@ async def cmd_delxpword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        await msg.reply_text("사용법: /delxpword <word>")
+        await msg.reply_text("사용법: /del_xp_word <word>")
         return
 
     word = args[0].strip()
@@ -1792,7 +1792,7 @@ async def cmd_setcooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 계속 진행은 허용
 
     if not args:
-        await msg.reply_text("사용법: /setcooldown <초>  (예: /setcooldown 7)")
+        await msg.reply_text("사용법: /set_cooldown <초>  (예: /set_cooldown 7)")
         return
 
     try:
@@ -1821,7 +1821,7 @@ async def cmd_setdailycap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("이 명령어는 DM에서 사용하는 것을 권장합니다.")
 
     if not args:
-        await msg.reply_text("사용법: /setdailycap <XP>  (예: /setdailycap 500)")
+        await msg.reply_text("사용법: /set_daily_cap <XP>  (예: /set_daily_cap 500)")
         return
 
     try:
@@ -1850,7 +1850,7 @@ async def cmd_setinvxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("이 명령어는 DM에서 사용하는 것을 권장합니다.")
 
     if not args:
-        await msg.reply_text("사용법: /setinvxp <XP>  (예: /setinvxp 100)")
+        await msg.reply_text("사용법: /set_inv_xp <XP>  (예: /set_inv_xp 100)")
         return
 
     try:
@@ -1879,14 +1879,14 @@ async def cmd_setcampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("이 명령어는 DM에서 사용하는 것을 권장합니다.")
 
     if len(args) != 2:
-        await msg.reply_text("사용법: /setcampaign YYYY-MM-DD YYYY-MM-DD")
+        await msg.reply_text("사용법: /set_campaign YYYY-MM-DD YYYY-MM-DD")
         return
 
     try:
         start_date = date.fromisoformat(args[0])
         end_date = date.fromisoformat(args[1])
     except ValueError:
-        await msg.reply_text("날짜 형식이 잘못되었습니다. 예: /setcampaign 2025-11-20 2025-11-27")
+        await msg.reply_text("날짜 형식이 잘못되었습니다. 예: /set_campaign 2025-11-20 2025-11-27")
         return
 
     if end_date < start_date:
@@ -2140,7 +2140,7 @@ async def cmd_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if not is_admin(user.id):
-        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        await msg.reply_text("관리자만 사용할 수 없습니다.")
         return
     if not is_private_chat(chat):
         await msg.reply_text("이 명령어는 봇과의 1:1 대화(디엠)에서만 사용해 주세요.")
@@ -2255,6 +2255,7 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # 로터리(추첨) 기능
 # -----------------------
+
 
 async def cmd_lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -2553,7 +2554,7 @@ def main():
 
     # 기본 명령어
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("chatid", cmd_chatid))
+    app.add_handler(CommandHandler("chat_id", cmd_chatid))
     app.add_handler(CommandHandler(["stats", "xp"], cmd_stats))
     app.add_handler(CommandHandler(["ranking", "rank"], cmd_ranking))
     app.add_handler(CommandHandler("daily", cmd_daily))
@@ -2567,25 +2568,25 @@ def main():
     app.add_handler(CommandHandler("lottery_end", cmd_lottery_end))
 
     # 관리자 / OWNER 명령어
-    app.add_handler(CommandHandler("listadmins", cmd_listadmins))
-    app.add_handler(CommandHandler("addadmin", cmd_addadmin))
-    app.add_handler(CommandHandler("deladmin", cmd_deladmin))
-    app.add_handler(CommandHandler("refuser", cmd_refuser))
-    app.add_handler(CommandHandler("userstats", cmd_userstats))
-    app.add_handler(CommandHandler("resetxp", cmd_resetxp))
+    app.add_handler(CommandHandler("list_admins", cmd_listadmins))
+    app.add_handler(CommandHandler("add_admin", cmd_addadmin))
+    app.add_handler(CommandHandler("del_admin", cmd_deladmin))
+    app.add_handler(CommandHandler("ref_user", cmd_refuser))
+    app.add_handler(CommandHandler("user_stats", cmd_userstats))
+    app.add_handler(CommandHandler("reset_xp", cmd_resetxp))
 
     # XP 키워드 관리
-    app.add_handler(CommandHandler("addxpbonus", cmd_addxpbonus))
-    app.add_handler(CommandHandler("addxpblock", cmd_addxpblock))
-    app.add_handler(CommandHandler("delxpword", cmd_delxpword))
-    app.add_handler(CommandHandler("listxpwords", cmd_listxpwords))
+    app.add_handler(CommandHandler("add_xp_bonus", cmd_addxpbonus))
+    app.add_handler(CommandHandler("add_xp_block", cmd_addxpblock))
+    app.add_handler(CommandHandler("del_xp_word", cmd_delxpword))
+    app.add_handler(CommandHandler("list_xp_words", cmd_listxpwords))
 
     # 안티 스팸/초대/캠페인 설정
-    app.add_handler(CommandHandler("setcooldown", cmd_setcooldown))
-    app.add_handler(CommandHandler("setdailycap", cmd_setdailycap))
-    app.add_handler(CommandHandler("setinvxp", cmd_setinvxp))
-    app.add_handler(CommandHandler("setcampaign", cmd_setcampaign))
-    app.add_handler(CommandHandler("clearcampaign", cmd_clearcampaign))
+    app.add_handler(CommandHandler("set_cooldown", cmd_setcooldown))
+    app.add_handler(CommandHandler("set_daily_cap", cmd_setdailycap))
+    app.add_handler(CommandHandler("set_inv_xp", cmd_setinvxp))
+    app.add_handler(CommandHandler("set_campaign", cmd_setcampaign))
+    app.add_handler(CommandHandler("clear_campaign", cmd_clearcampaign))
     app.add_handler(CommandHandler("add_xp", cmd_add_xp))
 
     # 기간 요약
