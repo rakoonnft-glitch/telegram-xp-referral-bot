@@ -788,7 +788,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     base_text = (
-        "안녕하세요! Terminal.Fi XP Bot입니다.\n"
+        "안녕하세요! 한국 커뮤니티 XP Bot입니다.\n"
         "커뮤니티에서 활동하면 XP를 얻고 레벨이 올라갑니다.\n\n"
         "📌 일반 명령어\n"
         "/stats - 내 스탯\n"
