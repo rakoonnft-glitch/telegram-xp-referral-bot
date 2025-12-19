@@ -37,6 +37,9 @@ MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "0"))
 # Bot owner
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# 자동 백업 보관 기간 (일) - 최근 N일만 유지
+BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "7"))
+
 # 최초 관리자 목록 (.env의 ADMIN_USER_IDS)
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 INITIAL_ADMIN_IDS: set[int] = set()
@@ -131,6 +134,7 @@ def ensure_bot_settings_columns(cur):
     - bot_active        : 1=동작, 0=중지
     - active_start_hour : 매일 시작 시각(KST, 시 단위)
     - active_end_hour   : 매일 종료 시각(KST, 시 단위)
+    - backup_active     : 1=자동백업 ON, 0=OFF
     """
     cur.execute("PRAGMA table_info(bot_settings)")
     cols = {row["name"] for row in cur.fetchall()}
@@ -141,6 +145,8 @@ def ensure_bot_settings_columns(cur):
         cur.execute("ALTER TABLE bot_settings ADD COLUMN active_start_hour INTEGER")
     if "active_end_hour" not in cols:
         cur.execute("ALTER TABLE bot_settings ADD COLUMN active_end_hour INTEGER")
+    if "backup_active" not in cols:
+        cur.execute("ALTER TABLE bot_settings ADD COLUMN backup_active INTEGER DEFAULT 1")
 
 
 def init_db():
@@ -242,7 +248,8 @@ def init_db():
             campaign_end TEXT,
             bot_active INTEGER DEFAULT 1,
             active_start_hour INTEGER,
-            active_end_hour INTEGER
+            active_end_hour INTEGER,
+            backup_active INTEGER DEFAULT 1
         )
         """
     )
@@ -272,8 +279,8 @@ def init_db():
         cur.execute(
             """
             INSERT INTO bot_settings
-            (id, cooldown_seconds, daily_xp_cap, invite_xp, bot_active)
-            VALUES (1, 7, 500, 100, 1)
+            (id, cooldown_seconds, daily_xp_cap, invite_xp, bot_active, backup_active)
+            VALUES (1, 7, 500, 100, 1, 1)
             """
         )
 
@@ -293,7 +300,8 @@ def get_settings():
         """
         SELECT cooldown_seconds, daily_xp_cap, invite_xp,
                campaign_start, campaign_end,
-               bot_active, active_start_hour, active_end_hour
+               bot_active, active_start_hour, active_end_hour,
+               backup_active
         FROM bot_settings WHERE id=1
         """
     )
@@ -309,6 +317,7 @@ def get_settings():
             "bot_active": 1,
             "active_start_hour": None,
             "active_end_hour": None,
+            "backup_active": 1,
         }
     return {
         "cooldown_seconds": row["cooldown_seconds"] or 0,
@@ -319,6 +328,7 @@ def get_settings():
         "bot_active": row["bot_active"] if row["bot_active"] is not None else 1,
         "active_start_hour": row["active_start_hour"],
         "active_end_hour": row["active_end_hour"],
+        "backup_active": row["backup_active"] if row["backup_active"] is not None else 1,
     }
 
 
@@ -332,6 +342,7 @@ def update_settings(**kwargs):
         "bot_active",
         "active_start_hour",
         "active_end_hour",
+        "backup_active",
     }
     fields = []
     values = []
@@ -819,6 +830,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/sub_xp <@handle 또는 user_id> <XP> - 특정 유저에게 XP 차감\n"
                 "/lottery [분] [당첨자수] - 그룹에서 추첨 시작\n"
                 "/lottery_end <인원수> - 추첨 종료 및 당첨자 추첨\n"
+                "/backup_on - 자동 백업 ON\n"
+                "/backup_off - 자동 백업 OFF\n"
+                "/backup_status - 자동 백업 상태\n"
+                "/backup_now - 즉시 수동 백업 실행\n"
             )
 
         # ✅ OWNER 전용 섹션: 여기에서만 /today /week /range 보임
@@ -834,7 +849,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     await message.reply_text(text)
-
 
 
 # -----------------------
@@ -921,6 +935,9 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    ✅ 유저용 스탯: 메시지 수(messages_count)는 노출하지 않음
+    """
     chat = update.effective_chat
     user = update.effective_user
     msg = update.message
@@ -943,7 +960,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     xp = row["xp"]
     level = row["level"]
-    msgs = row["messages_count"]
     next_xp = xp_for_next_level(level)
 
     now_kst = datetime.utcnow() + timedelta(hours=9)
@@ -982,8 +998,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 {user.full_name} 님의 통계\n\n"
         f"🎯 레벨: {level}\n"
         f"⭐ 총 경험치(Total XP): {xp}\n"
-        f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n"
-        f"💬 메시지 수: {msgs}\n\n"
+        f"📈 다음 레벨까지: {max(0, next_xp - xp)} XP\n\n"
         f"📆 이번 달 XP: {cur_month_xp}\n"
         f"📆 지난 달 XP: {prev_month_xp}\n"
     )
@@ -1237,7 +1252,6 @@ async def cmd_invites_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE
         lines.append(f"{i}. {name} - {invites}명")
 
     await update.message.reply_text("\n".join(lines))
-
 
 
 # -----------------------
@@ -1568,6 +1582,60 @@ def backup_db_to_zip() -> str:
             zf.write(DB_PATH, arcname=os.path.basename(DB_PATH))
 
     return zip_path
+
+
+def cleanup_old_backups(retention_days: int = BACKUP_RETENTION_DAYS):
+    """
+    retention_days 보다 오래된 xp_bot_backup_*.zip 파일 삭제 (서버 디스크 누적 방지)
+    - 파일명 기준이 아니라 mtime 기준 (더 안전)
+    """
+    base_dir = os.path.dirname(DB_PATH) or "."
+    now = datetime.utcnow()
+
+    try:
+        entries = os.listdir(base_dir)
+    except Exception:
+        logger.exception("backup cleanup: 디렉토리 목록 조회 실패 (%s)", base_dir)
+        return
+
+    for fname in entries:
+        if not fname.startswith("xp_bot_backup_") or not fname.endswith(".zip"):
+            continue
+
+        fpath = os.path.join(base_dir, fname)
+
+        try:
+            mtime = datetime.utcfromtimestamp(os.path.getmtime(fpath))
+        except Exception:
+            continue
+
+        age_days = (now - mtime).days
+        if age_days >= retention_days:
+            try:
+                os.remove(fpath)
+                logger.info("Old backup deleted: %s", fname)
+            except Exception:
+                logger.exception("Failed to delete old backup: %s", fname)
+
+
+async def notify_backup_failure(context: ContextTypes.DEFAULT_TYPE, reason: str):
+    """
+    백업 실패 시 OWNER에게 경고 DM
+    """
+    if not OWNER_ID:
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(
+                "🚨 자동 백업 실패 알림\n\n"
+                f"사유: {reason}\n"
+                "서버 상태 또는 디스크 용량을 확인해 주세요."
+            ),
+        )
+    except Exception:
+        logger.exception("백업 실패 알림 DM 전송 실패")
 
 
 async def cmd_resetxp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2075,6 +2143,94 @@ async def cmd_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -----------------------
+# 자동 백업 ON/OFF/상태/수동백업
+# -----------------------
+async def cmd_backup_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    update_settings(backup_active=1)
+    await msg.reply_text("✅ 자동 백업이 활성화되었습니다.")
+
+
+async def cmd_backup_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    update_settings(backup_active=0)
+    await msg.reply_text("🛑 자동 백업이 비활성화되었습니다.")
+
+
+async def cmd_backup_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    settings = get_settings()
+    status = "ON ✅" if settings.get("backup_active", 1) == 1 else "OFF 🛑"
+    await msg.reply_text(f"📦 자동 백업 상태: {status}\n(보관: 최근 {BACKUP_RETENTION_DAYS}일 유지)")
+
+
+async def cmd_backup_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.message
+
+    if not is_admin(user.id):
+        await msg.reply_text("관리자만 사용할 수 있습니다.")
+        return
+
+    if not is_private_chat(chat):
+        await msg.reply_text("⚠️ 이 명령어는 DM에서 사용하는 것을 권장합니다.")
+
+    await msg.reply_text("📦 수동 백업을 시작합니다...")
+
+    # ZIP 생성
+    try:
+        zip_path = backup_db_to_zip()
+    except Exception:
+        logger.exception("수동 백업 zip 생성 실패")
+        await notify_backup_failure(context, "수동 백업 ZIP 파일 생성 실패")
+        await msg.reply_text("❌ 수동 백업에 실패했습니다.")
+        return
+
+    # OWNER에게 전송
+    if OWNER_ID:
+        try:
+            with open(zip_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=OWNER_ID,
+                    document=f,
+                    caption="📦 수동 백업 파일입니다.",
+                )
+        except Exception:
+            logger.exception("수동 백업 DM 전송 실패")
+            await notify_backup_failure(context, "수동 백업 파일 DM 전송 실패")
+            await msg.reply_text("❌ 수동 백업 전송에 실패했습니다.")
+            return
+
+    # 오래된 백업 정리
+    try:
+        cleanup_old_backups()
+    except Exception:
+        logger.exception("수동 백업 정리 중 오류")
+        await notify_backup_failure(context, "수동 백업 후 오래된 백업 정리 중 오류")
+
+    await msg.reply_text("✅ 수동 백업이 완료되었습니다. (OWNER DM으로 전송됨)")
+
+
+# -----------------------
 # 수동 XP 지급/차감
 # -----------------------
 async def cmd_add_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2457,13 +2613,23 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
 async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
     """
     매일 자동 DB 백업 → OWNER에게만 ZIP 파일 DM
+    + backup_active ON/OFF
+    + 최근 N일만 유지(cleanup)
+    + 실패 시 OWNER 경고 DM
     """
+    settings = get_settings()
+    if settings.get("backup_active", 1) == 0:
+        return
+
+    # 1) ZIP 생성
     try:
         zip_path = backup_db_to_zip()
     except Exception:
         logger.exception("자동 백업 zip 생성 실패")
+        await notify_backup_failure(context, "백업 ZIP 파일 생성 실패")
         return
 
+    # 2) OWNER DM 전송
     if OWNER_ID:
         try:
             with open(zip_path, "rb") as f:
@@ -2474,7 +2640,15 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception:
             logger.exception("daily backup DM 실패 (OWNER_ID=%s)", OWNER_ID)
+            await notify_backup_failure(context, "OWNER에게 백업 파일 전송 실패")
+            return
 
+    # 3) 오래된 백업 정리
+    try:
+        cleanup_old_backups()
+    except Exception:
+        logger.exception("백업 정리(cleanup) 중 오류 발생")
+        await notify_backup_failure(context, "오래된 백업 파일 정리 중 오류 발생")
 
 
 # -----------------------
@@ -2815,7 +2989,6 @@ async def cmd_event_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("\n".join(lines))
 
 
-
 # -----------------------
 # MAIN
 # -----------------------
@@ -2872,10 +3045,18 @@ def main():
     app.add_handler(CommandHandler("bot_off", cmd_bot_off))
     app.add_handler(CommandHandler("bot_on", cmd_bot_on))
     app.add_handler(CommandHandler("bot_status", cmd_bot_status))
+
+    # 백업 제어 & 수동 백업
+    app.add_handler(CommandHandler("backup_on", cmd_backup_on))
+    app.add_handler(CommandHandler("backup_off", cmd_backup_off))
+    app.add_handler(CommandHandler("backup_status", cmd_backup_status))
+    app.add_handler(CommandHandler("backup_now", cmd_backup_now))
+
+    # 수동 XP 지급/차감
     app.add_handler(CommandHandler("add_xp", cmd_add_xp))
     app.add_handler(CommandHandler("sub_xp", cmd_sub_xp))
 
-    # 기간 요약
+    # 기간 요약 (OWNER)
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("range", cmd_range))
